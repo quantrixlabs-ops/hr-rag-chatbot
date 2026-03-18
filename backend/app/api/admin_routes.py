@@ -1,11 +1,15 @@
 """Admin endpoints — Section 20.3."""
 
 
+import csv
 import hashlib
+import io
+import json
 import sqlite3
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
@@ -104,10 +108,68 @@ async def security_events(user: User = Depends(get_current_user)):
             "SELECT event_type, user_id, ip_address, details, timestamp "
             "FROM security_events ORDER BY timestamp DESC LIMIT 100"
         ).fetchall()
-    import json
     return {"events": [{"event_type": r[0], "user_id": r[1], "ip_address": r[2],
                          "details": json.loads(r[3]) if r[3] else {}, "timestamp": r[4]} for r in rows],
             "count": len(rows)}
+
+
+@router.get("/security-events/export")
+async def export_security_events(
+    format: str = Query("csv", pattern="^(csv|json)$"),
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(get_current_user),
+):
+    """Export audit trail as CSV or JSON for compliance reporting."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    since = time.time() - (days * 86400)
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT event_type, user_id, ip_address, details, timestamp "
+            "FROM security_events WHERE timestamp>? ORDER BY timestamp DESC",
+            (since,),
+        ).fetchall()
+
+    if format == "json":
+        events = [{"event_type": r[0], "user_id": r[1], "ip_address": r[2],
+                    "details": json.loads(r[3]) if r[3] else {}, "timestamp": r[4]} for r in rows]
+        content = json.dumps({"exported_at": time.time(), "days": days, "events": events}, indent=2)
+        return StreamingResponse(
+            io.BytesIO(content.encode()),
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=audit_log_{days}d.json"},
+        )
+    else:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["event_type", "user_id", "ip_address", "details", "timestamp"])
+        for r in rows:
+            writer.writerow([r[0], r[1], r[2], r[3], r[4]])
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode()),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=audit_log_{days}d.csv"},
+        )
+
+
+@router.get("/users")
+async def list_users(user: User = Depends(get_current_user)):
+    """List all users — admin only."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT user_id, username, role, department, full_name, email, created_at "
+            "FROM users WHERE username NOT LIKE 'deleted_%' ORDER BY created_at DESC"
+        ).fetchall()
+    return {
+        "users": [
+            {"user_id": r[0], "username": r[1], "role": r[2], "department": r[3],
+             "full_name": r[4], "email": r[5], "created_at": r[6]}
+            for r in rows
+        ],
+        "count": len(rows),
+    }
 
 
 # ── PHASE 1: Role assignment endpoint ────────────────────────────────────────

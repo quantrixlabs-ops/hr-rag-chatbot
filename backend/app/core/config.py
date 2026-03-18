@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # ── File Storage ─────────────────────────────────────────────────────
     upload_dir: str = "./data/uploads"
 
+    # ── Enterprise Security (Phase B) ─────────────────────────────────
+    admin_allowed_ips: str = ""  # Comma-separated IPs, empty = allow all
+    api_keys: str = ""  # Comma-separated API keys for service-to-service auth
+    session_inactivity_minutes: int = 30  # Frontend idle timeout
+    data_retention_days: int = 365  # How long to keep logs/audit trails
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 

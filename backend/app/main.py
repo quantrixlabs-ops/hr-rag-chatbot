@@ -256,16 +256,33 @@ def create_app() -> FastAPI:
             _global_rate[client_ip].append(now)
             return await call_next(request)
 
+    # IP allowlisting for admin endpoints (Phase B)
+    _admin_allowed_ips = set(
+        ip.strip() for ip in s.admin_allowed_ips.split(",") if ip.strip()
+    ) if s.admin_allowed_ips else set()
+
+    class AdminIPAllowlistMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if _admin_allowed_ips and request.url.path.startswith("/admin"):
+                client_ip = request.client.host if request.client else "unknown"
+                if client_ip not in _admin_allowed_ips and client_ip != "127.0.0.1":
+                    from starlette.responses import JSONResponse
+                    return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
+            return await call_next(request)
+
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(GlobalRateLimitMiddleware)
     app.add_middleware(RequestIdMiddleware)
+    if _admin_allowed_ips:
+        app.add_middleware(AdminIPAllowlistMiddleware)
 
     # Routers
-    from backend.app.api import auth_routes, chat_routes, document_routes, admin_routes
+    from backend.app.api import auth_routes, chat_routes, document_routes, admin_routes, user_routes
     app.include_router(auth_routes.router)
     app.include_router(chat_routes.router)
     app.include_router(document_routes.router)
     app.include_router(admin_routes.router)
+    app.include_router(user_routes.router)
 
     # Prometheus metrics — secured behind admin auth
     from backend.app.core.security import get_current_user, require_role

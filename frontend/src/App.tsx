@@ -93,6 +93,30 @@ export default function App() {
     }
   }, [auth.token, auth.refreshToken, auth.user])
 
+  // Inactivity timeout — logout after 30 minutes of no interaction
+  const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const INACTIVITY_TIMEOUT = 30 * 60 * 1000 // 30 minutes
+
+  useEffect(() => {
+    if (!auth.token) return
+
+    const resetTimer = () => {
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
+      inactivityTimer.current = setTimeout(() => {
+        handleLogout()
+      }, INACTIVITY_TIMEOUT)
+    }
+
+    const events = ['mousedown', 'keydown', 'scroll', 'touchstart']
+    events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }))
+    resetTimer()
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, resetTimer))
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current)
+    }
+  }, [auth.token, handleLogout])
+
   // Load sessions
   useEffect(() => {
     if (auth.token) {

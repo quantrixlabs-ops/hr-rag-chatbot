@@ -186,6 +186,16 @@ async def get_current_user(
     return User(user_id=user_id, role=row[0], department=row[1])
 
 
+# ── API Key authentication (service-to-service) ─────────────────────────────
+def verify_api_key(api_key: str) -> bool:
+    """Validate an API key for service-to-service calls."""
+    s = get_settings()
+    if not s.api_keys:
+        return False
+    valid_keys = {k.strip() for k in s.api_keys.split(",") if k.strip()}
+    return api_key in valid_keys
+
+
 # ── RBAC helpers ─────────────────────────────────────────────────────────────
 def get_allowed_roles(user_role: str) -> list[str]:
     return ROLE_HIERARCHY.get(user_role, ["employee"])
