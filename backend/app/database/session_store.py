@@ -15,9 +15,21 @@ from backend.app.models.session_models import ConversationTurn, Session
 logger = structlog.get_logger()
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    plan TEXT DEFAULT 'trial',
+    settings TEXT DEFAULT '{}',
+    created_at REAL NOT NULL,
+    is_active INTEGER DEFAULT 1
+);
+INSERT OR IGNORE INTO tenants (tenant_id, name, slug, plan, created_at, is_active)
+    VALUES ('default', 'Default Organization', 'default', 'enterprise', 0, 1);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_role TEXT NOT NULL,
-    created_at REAL NOT NULL, last_active REAL NOT NULL, metadata TEXT DEFAULT '{}'
+    created_at REAL NOT NULL, last_active REAL NOT NULL, metadata TEXT DEFAULT '{}',
+    tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -30,24 +42,26 @@ CREATE TABLE IF NOT EXISTS documents (
     access_roles TEXT NOT NULL, effective_date TEXT, version TEXT,
     source_filename TEXT NOT NULL, uploaded_by TEXT NOT NULL,
     uploaded_at REAL NOT NULL, page_count INTEGER DEFAULT 0, chunk_count INTEGER DEFAULT 0,
-    content_hash TEXT DEFAULT ''
+    content_hash TEXT DEFAULT '', tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
     query TEXT NOT NULL, answer TEXT NOT NULL, rating TEXT NOT NULL,
-    timestamp REAL NOT NULL, user_id TEXT NOT NULL
+    timestamp REAL NOT NULL, user_id TEXT NOT NULL, tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS query_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT NOT NULL,
     query_type TEXT, user_role TEXT NOT NULL, faithfulness_score REAL,
     hallucination_risk REAL, latency_ms REAL, top_chunk_score REAL,
-    user_feedback TEXT, timestamp REAL NOT NULL
+    user_feedback TEXT, timestamp REAL NOT NULL, sources_used TEXT DEFAULT '',
+    tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'employee',
     department TEXT, created_at REAL NOT NULL,
-    full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT ''
+    full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '',
+    tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,7 +69,8 @@ CREATE TABLE IF NOT EXISTS security_events (
     user_id TEXT,
     ip_address TEXT,
     details TEXT DEFAULT '{}',
-    timestamp REAL NOT NULL
+    timestamp REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_ts ON security_events(timestamp);
 CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -63,7 +78,8 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     user_id TEXT NOT NULL,
     expires_at REAL NOT NULL,
     revoked INTEGER DEFAULT 0,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 """
@@ -100,6 +116,13 @@ def _run_migrations(con: sqlite3.Connection) -> None:
     for col in ("full_name", "email", "phone"):
         if not _has_column("users", col):
             con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
+
+    # Migration: SaaS-ready tenant_id on all tables
+    _tenant_tables = ["users", "sessions", "documents", "feedback",
+                      "query_logs", "security_events", "refresh_tokens"]
+    for table in _tenant_tables:
+        if not _has_column(table, "tenant_id"):
+            con.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT DEFAULT 'default'")
 
 
 class SessionStore:
