@@ -1,12 +1,12 @@
 """Document management endpoints — Section 20.2."""
 
-from __future__ import annotations
 
 import json
 import os
 import sqlite3
 import time
 from collections import defaultdict
+from typing import List
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -214,7 +214,7 @@ async def delete_doc(document_id: str, user: User = Depends(get_current_user)):
 
 
 class BatchDeleteRequest(BaseModel):
-    document_ids: list[str]
+    document_ids: List[str]
 
 
 @router.post("/batch-delete")

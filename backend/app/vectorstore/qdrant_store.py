@@ -57,7 +57,7 @@ class QdrantStore:
         ]
         client.upsert(collection_name=self.collection, points=points)
 
-    def search(self, query_embedding, top_k: int = 20, role_filter: list[str] | None = None) -> list[SearchResult]:
+    def search(self, query_embedding, top_k: int = 20, role_filter: Optional[list[str]] = None) -> list[SearchResult]:
         from qdrant_client.models import FieldCondition, Filter, MatchAny
         client = self._get_client()
         qf = None

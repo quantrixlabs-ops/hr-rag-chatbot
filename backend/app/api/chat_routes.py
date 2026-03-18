@@ -1,6 +1,5 @@
 """Chat endpoints — Section 20.1."""
 
-from __future__ import annotations
 
 import hashlib
 import json

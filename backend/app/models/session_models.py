@@ -10,7 +10,7 @@ class ConversationTurn:
     role: str
     content: str
     timestamp: float
-    metadata: dict | None = None
+    metadata: Optional[dict] = None
 
 
 @dataclass
@@ -35,4 +35,4 @@ class ChatResult:
     latency_ms: float
     flagged: bool = False
     chunks: list = field(default_factory=list)
-    verification: object | None = None
+    verification: Optional[object] = None

@@ -1,6 +1,5 @@
 """Admin endpoints — Section 20.3."""
 
-from __future__ import annotations
 
 import hashlib
 import sqlite3

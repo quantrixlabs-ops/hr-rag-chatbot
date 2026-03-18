@@ -58,7 +58,7 @@ class FAISSIndex:
         self,
         query_embedding: np.ndarray,
         top_k: int = 20,
-        role_filter: list[str] | None = None,
+        role_filter: Optional[list[str]] = None,
     ) -> list[SearchResult]:
         if self.index.ntotal == 0:
             return []

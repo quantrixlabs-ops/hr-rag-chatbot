@@ -109,7 +109,7 @@ def _heading_chunk(text: str, size: int = 400, overlap: int = 60) -> list[tuple[
 def chunk_document(
     text: str,
     meta: DocumentMetadata,
-    page_number: int | None = None,
+    page_number: Optional[int] = None,
 ) -> list[ChunkMetadata]:
     """Chunk a single text block, attaching page number if provided."""
     rules = HR_CHUNK_RULES.get(meta.category, {"size": 400, "overlap": 60})

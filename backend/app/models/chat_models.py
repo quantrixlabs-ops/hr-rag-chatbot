@@ -1,8 +1,9 @@
 """Pydantic request/response models for chat — Sections 4 & 20."""
 
-from __future__ import annotations
 
 from enum import Enum
+
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -10,26 +11,26 @@ from pydantic import BaseModel, Field
 class User(BaseModel):
     user_id: str
     role: str = "employee"
-    department: str | None = None
+    department: Optional[str] = None
 
 
 class ChatQueryRequest(BaseModel):
     query: str
-    session_id: str | None = None
+    session_id: Optional[str] = None
     include_sources: bool = True
     include_trace: bool = False
 
 
 class CitationOut(BaseModel):
     source: str
-    page: int | None = None
+    page: Optional[int] = None
     excerpt: str = ""
 
 
 class ChatQueryResponse(BaseModel):
     answer: str
     session_id: str
-    citations: list[CitationOut] = []
+    citations: List[CitationOut] = []
     confidence: float = 0.0
     faithfulness_score: float = 0.0
     query_type: str = "factual"

@@ -20,7 +20,7 @@ class ChatService:
         self.sessions = session_store
         self.rag = rag_pipeline
 
-    def handle_query(self, query: str, user: User, session_id: str | None = None) -> ChatResult:
+    def handle_query(self, query: str, user: User, session_id: Optional[str] = None) -> ChatResult:
         t0 = time.time()
 
         # Sanitize input

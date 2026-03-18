@@ -68,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 """
 
 
-def init_database(db_path: str | None = None) -> None:
+def init_database(db_path: Optional[str] = None) -> None:
     path = db_path or get_settings().db_path
     with sqlite3.connect(path) as con:
         con.executescript(_SCHEMA)
@@ -97,7 +97,7 @@ def _run_migrations(con: sqlite3.Connection) -> None:
 
 
 class SessionStore:
-    def __init__(self, db_path: str | None = None):
+    def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or get_settings().db_path
 
     # ── Session CRUD ─────────────────────────────────────────────────────
@@ -111,7 +111,7 @@ class SessionStore:
             )
         return Session(session_id=sid, user_id=user_id, user_role=user_role, turns=[], created_at=now, last_active=now)
 
-    def get_session(self, session_id: str) -> Session | None:
+    def get_session(self, session_id: str) -> Optional[Session]:
         with sqlite3.connect(self.db_path) as con:
             row = con.execute(
                 "SELECT session_id,user_id,user_role,created_at,last_active,metadata FROM sessions WHERE session_id=?",
@@ -126,7 +126,7 @@ class SessionStore:
             metadata=json.loads(row[5]) if row[5] else {},
         )
 
-    def add_turn(self, session_id: str, role: str, content: str, metadata: dict | None = None) -> None:
+    def add_turn(self, session_id: str, role: str, content: str, metadata: Optional[dict] = None) -> None:
         now = time.time()
         with sqlite3.connect(self.db_path) as con:
             con.execute(

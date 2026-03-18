@@ -43,7 +43,7 @@ _LLM_ERROR_ANSWER = (
 def _build_prompt(
     query: str,
     context: str,
-    turns: list[ConversationTurn] | None = None,
+    turns: Optional[list[ConversationTurn]] = None,
     company: str = "Acme Corp",
     hr_contact: str = "your HR department",
 ) -> str:
@@ -128,7 +128,7 @@ class RAGPipeline:
         self,
         query: str,
         user_role: str,
-        session_turns: list[ConversationTurn] | None = None,
+        session_turns: Optional[list[ConversationTurn]] = None,
     ) -> ChatResult:
         t0 = time.time()
         analysis = self.qa.analyze(query)

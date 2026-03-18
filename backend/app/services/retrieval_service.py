@@ -30,7 +30,7 @@ def _tokenize(text: str) -> list[str]:
 
 class BM25Retriever:
     def __init__(self):
-        self.index: BM25Okapi | None = None
+        self.index: Optional[BM25Okapi] = None
         self.chunks: list[ChunkMetadata] = []
 
     def build_index(self, chunks: list[ChunkMetadata]) -> None:
@@ -42,7 +42,7 @@ class BM25Retriever:
         self.chunks.extend(new)
         self.index = BM25Okapi([_tokenize(c.text) for c in self.chunks])
 
-    def retrieve(self, query: str, top_k: int = 20, role_filter: list[str] | None = None) -> list[SearchResult]:
+    def retrieve(self, query: str, top_k: int = 20, role_filter: Optional[list[str]] = None) -> list[SearchResult]:
         if not self.index or not self.chunks:
             return []
         scores = self.index.get_scores(_tokenize(query))
@@ -151,7 +151,7 @@ class DenseRetriever:
         self.emb = embedding_service
         self.vs = vector_store
 
-    def retrieve(self, query: str, top_k: int = 20, role_filter: list[str] | None = None) -> list[SearchResult]:
+    def retrieve(self, query: str, top_k: int = 20, role_filter: Optional[list[str]] = None) -> list[SearchResult]:
         qe = self.emb.embed(query)
         return self.vs.search(qe, top_k=top_k, role_filter=role_filter)
 
@@ -178,7 +178,7 @@ class RetrievalOrchestrator:
         self.dw = dense_weight
         self.bw = bm25_weight
 
-    def retrieve(self, query: str, role_filter: list[str] | None = None) -> tuple[list[SearchResult], dict]:
+    def retrieve(self, query: str, role_filter: Optional[list[str]] = None) -> tuple[list[SearchResult], dict]:
         t0 = time.time()
 
         # Stage 1: Dense

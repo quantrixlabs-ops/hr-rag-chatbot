@@ -46,7 +46,7 @@ class ModelGateway:
 
     def _ollama(self, prompt: str, model: str, temp: float, mt: int) -> LLMResponse:
         url = f"{self.cfg['ollama']['base_url']}/api/generate"
-        last_err: Exception | None = None
+        last_err: Optional[Exception] = None
 
         for attempt in range(1, _MAX_RETRIES + 1):
             try:

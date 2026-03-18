@@ -1,6 +1,5 @@
 """Authentication endpoints — Section 20.4."""
 
-from __future__ import annotations
 
 import html
 import re
@@ -8,6 +7,7 @@ import sqlite3
 import time
 import uuid
 from collections import defaultdict
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -83,7 +83,7 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    department: str | None = None
+    department: Optional[str] = None
     # NOTE: role is intentionally excluded — all registrations are "employee".
     # Admin roles must be assigned via database migration or admin API.
 
@@ -176,13 +176,13 @@ _logout_bearer = HTTPBearer(auto_error=False)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str | None = None
+    refresh_token: Optional[str] = None
 
 
 @router.post("/logout")
 async def logout(
-    body: LogoutRequest | None = None,
-    creds: HTTPAuthorizationCredentials | None = Depends(_logout_bearer),
+    body: Optional[LogoutRequest] = None,
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_logout_bearer),
 ):
     """Revoke the access token AND optional refresh token."""
     if not creds:

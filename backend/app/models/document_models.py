@@ -14,7 +14,7 @@ class DocumentUploadResponse(BaseModel):
 
 
 class ReindexRequest(BaseModel):
-    document_id: str | None = None
+    document_id: Optional[str] = None
     force: bool = False
 
 
@@ -40,14 +40,14 @@ class ChunkMetadata:
     chunk_id: str
     document_id: str
     text: str
-    page: int | None
-    section_heading: str | None
+    page: Optional[int]
+    section_heading: Optional[str]
     chunk_index: int
     access_roles: list[str]
     category: str
     token_count: int
     source: str = ""
-    embedding_id: str | None = None
+    embedding_id: Optional[str] = None
 
 
 @dataclass
@@ -56,14 +56,14 @@ class SearchResult:
     text: str
     score: float
     source: str
-    page: int | None
-    metadata: dict | None = None
+    page: Optional[int]
+    metadata: Optional[dict] = None
 
 
 @dataclass
 class Citation:
     source: str
-    page: int | None
+    page: Optional[int]
     text_excerpt: str
 
 

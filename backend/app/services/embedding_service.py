@@ -86,7 +86,7 @@ class EmbeddingService:
 
     # ── Ollama provider ──────────────────────────────────────────────────
     def _ollama_embed(self, text: str) -> np.ndarray:
-        last_err: Exception | None = None
+        last_err: Optional[Exception] = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 resp = httpx.post(

@@ -80,7 +80,7 @@ def is_token_revoked(jti: str) -> bool:
     return True
 
 
-def create_access_token(user_id: str, role: str, department: str | None = None) -> str:
+def create_access_token(user_id: str, role: str, department: Optional[str] = None) -> str:
     s = get_settings()
     now = int(time.time())
     payload = {
@@ -115,7 +115,7 @@ def create_refresh_token(user_id: str) -> str:
     return token
 
 
-def validate_refresh_token(token: str) -> str | None:
+def validate_refresh_token(token: str) -> Optional[str]:
     """Validate a refresh token. Returns user_id if valid, None otherwise."""
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
@@ -250,7 +250,7 @@ def log_document_upload(user: User, doc_id: str, category: str, filename: str) -
     logger.info("document_upload", user_id=user.user_id, document_id=doc_id, category=category, filename=filename)
 
 
-def log_admin_action(user: User, action: str, details: dict | None = None) -> None:
+def log_admin_action(user: User, action: str, details: Optional[dict] = None) -> None:
     logger.info("admin_action", user_id=user.user_id, role=user.role, action=action,
                 details=details or {}, timestamp=time.time())
 
@@ -271,7 +271,7 @@ def mask_pii(text: str) -> str:
     return text
 
 
-def log_security_event(event_type: str, details: dict | None = None, user_id: str = "",
+def log_security_event(event_type: str, details: Optional[dict] = None, user_id: str = "",
                        ip_address: str = "") -> None:
     """Log security event to structured log AND database for audit trail."""
     import json as _json

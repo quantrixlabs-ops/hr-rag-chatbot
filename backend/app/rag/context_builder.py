@@ -23,7 +23,7 @@ class ContextBuilder:
     def build(
         self,
         chunks: list[SearchResult],
-        session_context: list[ConversationTurn] | None = None,
+        session_context: Optional[list[ConversationTurn]] = None,
     ) -> str:
         parts: list[str] = []
         tokens = 0
