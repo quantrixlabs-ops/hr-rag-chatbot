@@ -143,7 +143,22 @@ async def lifespan(app: FastAPI):
     reg = _wire_services()
     set_registry(reg)
 
-    logger.info("ready", indexed_chunks=reg["vector_store"].total_chunks)
+    chunks = reg["vector_store"].total_chunks
+    logger.info("ready", indexed_chunks=chunks)
+    if s.environment != "production":
+        print("\n" + "=" * 60)
+        print("  HR RAG Chatbot — Ready")
+        print("=" * 60)
+        print(f"  API:      http://localhost:{s.api_port}")
+        print(f"  Docs:     http://localhost:{s.api_port}/docs")
+        print(f"  Chunks:   {chunks} indexed")
+        print(f"  LLM:      {s.llm_model} via {s.llm_provider}")
+        print("-" * 60)
+        print("  Demo Credentials:")
+        print("    admin      / Admin@12345!!     (hr_admin)")
+        print("    manager1   / Manager@12345!!   (manager)")
+        print("    employee1  / Employee@12345!!  (employee)")
+        print("=" * 60 + "\n")
     yield
 
     # Shutdown
@@ -260,6 +275,11 @@ def create_app() -> FastAPI:
     async def prometheus_metrics(user: User = Depends(get_current_user)):
         require_role(user, "hr_admin")
         return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    # Public app info (non-sensitive, used by frontend for branding)
+    @app.get("/info")
+    def app_info():
+        return {"company_name": s.company_name, "version": "1.0.0"}
 
     # VULN-003: Public health returns ONLY status — no infrastructure details
     @app.get("/health")
