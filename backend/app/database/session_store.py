@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS query_logs (
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'employee',
-    department TEXT, created_at REAL NOT NULL
+    department TEXT, created_at REAL NOT NULL,
+    full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +95,11 @@ def _run_migrations(con: sqlite3.Connection) -> None:
     # Migration: query_logs.sources_used — tracks which documents answered each query
     if not _has_column("query_logs", "sources_used"):
         con.execute("ALTER TABLE query_logs ADD COLUMN sources_used TEXT DEFAULT ''")
+
+    # Migration: users profile fields
+    for col in ("full_name", "email", "phone"):
+        if not _has_column("users", col):
+            con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
 
 
 class SessionStore:

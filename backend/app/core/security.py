@@ -12,7 +12,7 @@ import structlog
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from passlib.hash import bcrypt
+import bcrypt as _bcrypt
 
 from backend.app.core.config import get_settings
 from backend.app.models.chat_models import User
@@ -203,11 +203,14 @@ def require_role(user: User, minimum_role: str) -> None:
 
 # ── Password helpers ─────────────────────────────────────────────────────────
 def hash_password(password: str) -> str:
-    return bcrypt.hash(password)
+    return _bcrypt.hashpw(password.encode("utf-8"), _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.verify(plain, hashed)
+    try:
+        return _bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 # ── Query sanitization ───────────────────────────────────────────────────────

@@ -31,10 +31,19 @@ export async function login(username: string, password: string) {
   return res.json()
 }
 
-export async function register(username: string, password: string) {
+export interface RegisterData {
+  username: string
+  password: string
+  full_name?: string
+  email?: string
+  phone?: string
+  role?: string
+}
+
+export async function register(data: RegisterData) {
   const res = await fetch(`${BASE}/auth/register`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify(data),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))

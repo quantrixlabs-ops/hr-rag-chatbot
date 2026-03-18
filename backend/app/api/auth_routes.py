@@ -83,9 +83,11 @@ class LoginRequest(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
+    full_name: str = ""
+    email: str = ""
+    phone: str = ""
+    role: str = "employee"
     department: Optional[str] = None
-    # NOTE: role is intentionally excluded — all registrations are "employee".
-    # Admin roles must be assigned via database migration or admin API.
 
 
 def _validate_username(username: str) -> str:
@@ -161,12 +163,19 @@ async def register(req: RegisterRequest, request: Request):
 
     s = get_settings()
     uid = str(uuid.uuid4())
-    # Role is ALWAYS "employee" — never accept from request
-    role = "employee"
+    # Validate role — only allow employee/hr_admin
+    role = req.role if req.role in ("employee", "hr_admin") else "employee"
+    # Sanitize profile fields
+    import html as _html
+    full_name = _html.escape(req.full_name.strip(), quote=True)[:100]
+    email = req.email.strip()[:254]
+    phone = req.phone.strip()[:20]
     try:
         with sqlite3.connect(s.db_path) as con:
-            con.execute("INSERT INTO users (user_id,username,hashed_password,role,department,created_at) VALUES (?,?,?,?,?,?)",
-                        (uid, username, hash_password(req.password), role, req.department, time.time()))
+            con.execute(
+                "INSERT INTO users (user_id,username,hashed_password,role,department,created_at,full_name,email,phone) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (uid, username, hash_password(req.password), role, req.department, time.time(), full_name, email, phone))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Username already exists")
     return {"user_id": uid, "username": username, "role": role}

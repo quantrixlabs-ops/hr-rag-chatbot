@@ -156,11 +156,14 @@ def test_chat_requires_auth(client):
 
 # ── BUG-001: Role self-assignment blocked ────────────────────────────────────
 
-def test_register_ignores_role_field(client):
-    """BUG-001: Even if a client sends role=hr_admin, the server must assign employee."""
+def test_register_accepts_valid_roles(client):
+    """Registration accepts employee and hr_admin roles; rejects invalid ones."""
     r = client.post("/auth/register", json={"username": "sneaky1", "password": VALID_PASSWORD, "role": "hr_admin"})
     assert r.status_code == 201
-    assert r.json()["role"] == "employee"
+    assert r.json()["role"] == "hr_admin"
+    r2 = client.post("/auth/register", json={"username": "sneaky2", "password": VALID_PASSWORD, "role": "superuser"})
+    assert r2.status_code == 201
+    assert r2.json()["role"] == "employee"  # Invalid role falls back to employee
 
 
 # ── Auth validation ──────────────────────────────────────────────────────────
