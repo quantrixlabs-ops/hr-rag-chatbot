@@ -241,3 +241,76 @@ async def refresh(req: RefreshRequest):
         "token_type": "bearer",
         "expires_in": s.access_token_expire_minutes * 60,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2FA / TOTP (Phase B8)
+# ══════════════════════════════════════════════════════════════════════════════
+
+from backend.app.core.security import get_current_user
+from backend.app.models.chat_models import User
+
+
+class TOTPSetupResponse(BaseModel):
+    secret: str
+    provisioning_uri: str
+
+
+class TOTPVerifyRequest(BaseModel):
+    code: str
+
+
+@router.post("/2fa/setup", response_model=TOTPSetupResponse)
+async def setup_2fa(user: User = Depends(get_current_user)):
+    """Generate a TOTP secret and provisioning URI for authenticator app setup."""
+    from backend.app.core.totp import is_available, generate_totp_secret, get_provisioning_uri
+    if not is_available():
+        raise HTTPException(501, "2FA not available — install pyotp: pip install pyotp")
+    s = get_settings()
+    # Check if already enabled
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT totp_enabled, username FROM users WHERE user_id=?", (user.user_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "User not found")
+    if row[0]:
+        raise HTTPException(409, "2FA is already enabled for this account")
+    secret = generate_totp_secret()
+    uri = get_provisioning_uri(secret, row[1], s.company_name)
+    # Store secret (not yet enabled until verified)
+    with sqlite3.connect(s.db_path) as con:
+        con.execute("UPDATE users SET totp_secret=? WHERE user_id=?", (secret, user.user_id))
+    return TOTPSetupResponse(secret=secret, provisioning_uri=uri)
+
+
+@router.post("/2fa/verify")
+async def verify_and_enable_2fa(req: TOTPVerifyRequest, user: User = Depends(get_current_user)):
+    """Verify a TOTP code to confirm setup and enable 2FA."""
+    from backend.app.core.totp import verify_totp
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT totp_secret FROM users WHERE user_id=?", (user.user_id,)).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(400, "2FA setup not initiated — call /auth/2fa/setup first")
+    if not verify_totp(row[0], req.code):
+        raise HTTPException(401, "Invalid TOTP code")
+    with sqlite3.connect(s.db_path) as con:
+        con.execute("UPDATE users SET totp_enabled=1 WHERE user_id=?", (user.user_id,))
+    log_security_event("2fa_enabled", {"user_id": user.user_id}, user_id=user.user_id)
+    return {"status": "2fa_enabled"}
+
+
+@router.delete("/2fa")
+async def disable_2fa(req: TOTPVerifyRequest, user: User = Depends(get_current_user)):
+    """Disable 2FA (requires valid TOTP code to confirm)."""
+    from backend.app.core.totp import verify_totp
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT totp_secret, totp_enabled FROM users WHERE user_id=?", (user.user_id,)).fetchone()
+    if not row or not row[1]:
+        raise HTTPException(400, "2FA is not enabled")
+    if not verify_totp(row[0], req.code):
+        raise HTTPException(401, "Invalid TOTP code")
+    with sqlite3.connect(s.db_path) as con:
+        con.execute("UPDATE users SET totp_enabled=0, totp_secret='' WHERE user_id=?", (user.user_id,))
+    log_security_event("2fa_disabled", {"user_id": user.user_id}, user_id=user.user_id)
+    return {"status": "2fa_disabled"}

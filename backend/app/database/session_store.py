@@ -117,6 +117,12 @@ def _run_migrations(con: sqlite3.Connection) -> None:
         if not _has_column("users", col):
             con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT ''")
 
+    # Migration: 2FA TOTP fields
+    if not _has_column("users", "totp_secret"):
+        con.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT ''")
+    if not _has_column("users", "totp_enabled"):
+        con.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER DEFAULT 0")
+
     # Migration: SaaS-ready tenant_id on all tables
     _tenant_tables = ["users", "sessions", "documents", "feedback",
                       "query_logs", "security_events", "refresh_tokens"]

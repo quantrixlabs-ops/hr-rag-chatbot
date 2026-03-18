@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     api_keys: str = ""  # Comma-separated API keys for service-to-service auth
     session_inactivity_minutes: int = 30  # Frontend idle timeout
     data_retention_days: int = 365  # How long to keep logs/audit trails
+    encryption_key: str = ""  # Fernet key for data-at-rest encryption (generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

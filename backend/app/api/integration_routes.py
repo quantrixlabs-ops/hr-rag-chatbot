@@ -249,3 +249,120 @@ async def widget_config():
             "What is the remote work policy?",
         ],
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MICROSOFT TEAMS INTEGRATION (Phase D2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TeamsActivity(BaseModel):
+    type: str  # "message", "conversationUpdate"
+    text: Optional[str] = None
+    from_user: Optional[dict] = None
+    conversation: Optional[dict] = None
+    serviceUrl: Optional[str] = None
+
+
+@router.post("/integrations/teams/messages")
+async def teams_messages(activity: TeamsActivity, api_key: str = Depends(_require_api_key)):
+    """Microsoft Teams Bot Framework messaging endpoint.
+
+    Setup:
+      1. Register a bot in Azure Bot Service
+      2. Set messaging endpoint to: https://your-domain.com/integrations/teams/messages
+      3. Add X-API-Key header in bot configuration
+
+    In production, verify the Bearer token from Bot Framework instead of API key.
+    """
+    if activity.type == "conversationUpdate":
+        return {"type": "message", "text": "Hello! I'm your HR assistant. Ask me anything about company policies."}
+
+    if activity.type == "message" and activity.text:
+        text = activity.text.strip()
+        if not text:
+            return {"type": "message", "text": "Please type a question."}
+
+        logger.info("teams_message", text=text[:80])
+
+        try:
+            reg = get_registry()
+            rag = reg["rag"]
+            result = rag.query(query=text, user_role="employee")
+            answer = result.answer
+            if result.citations:
+                sources = list({c.source for c in result.citations})
+                answer += f"\n\n**Sources:** {', '.join(sources)}"
+            return {"type": "message", "text": answer}
+        except Exception as e:
+            logger.error("teams_rag_error", error=str(e))
+            return {"type": "message", "text": "Sorry, I couldn't process that. Please try again."}
+
+    return {"type": "message", "text": "I can help with HR questions. Just type your question!"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EMAIL GATEWAY (Phase D5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class InboundEmail(BaseModel):
+    from_address: str
+    subject: str
+    body: str
+    message_id: Optional[str] = None
+
+
+@router.post("/integrations/email/inbound")
+async def email_inbound(email: InboundEmail, api_key: str = Depends(_require_api_key)):
+    """Process inbound emails and generate HR answers.
+
+    Integration: Configure your email service (SendGrid, Mailgun, AWS SES)
+    to forward HR inbox emails to this webhook.
+
+    Returns the answer text — your email service can send it as a reply.
+    """
+    query = email.body.strip()
+    if not query:
+        query = email.subject
+
+    if len(query) > 1000:
+        query = query[:1000]
+
+    logger.info("email_inbound", from_addr=email.from_address[:30], subject=email.subject[:50])
+
+    try:
+        reg = get_registry()
+        rag = reg["rag"]
+        result = rag.query(query=query, user_role="employee")
+
+        reply_body = f"Re: {email.subject}\n\n{result.answer}"
+        if result.citations:
+            sources = list({c.source for c in result.citations})
+            reply_body += f"\n\nSources: {', '.join(sources)}"
+        reply_body += "\n\n---\nThis is an automated response from the HR Assistant."
+
+        return {
+            "status": "processed",
+            "reply_to": email.from_address,
+            "subject": f"Re: {email.subject}",
+            "body": reply_body,
+            "confidence": result.confidence,
+        }
+    except Exception as e:
+        logger.error("email_processing_error", error=str(e))
+        return {
+            "status": "error",
+            "reply_to": email.from_address,
+            "subject": f"Re: {email.subject}",
+            "body": "We received your question but encountered an error. Please try again or contact HR directly.",
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# A/B TESTING API (Phase C2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/admin/experiments")
+async def list_ab_experiments(api_key: str = Depends(_require_api_key)):
+    """List all active A/B testing experiments and their variants."""
+    from backend.app.core.ab_testing import list_experiments
+    return {"experiments": list_experiments()}
