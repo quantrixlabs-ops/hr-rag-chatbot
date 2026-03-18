@@ -332,6 +332,36 @@ async def clear_semantic_cache(user: User = Depends(get_current_user)):
     return {"status": "cache_cleared"}
 
 
+@router.get("/ai-responses")
+async def list_ai_responses(
+    limit: int = Query(50, ge=1, le=200),
+    user: User = Depends(get_current_user),
+):
+    """View AI response history with safety metadata — admin audit trail."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT query_hash, answer, confidence, faithfulness, verdict, "
+            "sources_used, safety_issues, model, created_at "
+            "FROM response_versions ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {
+        "responses": [
+            {
+                "query_hash": r[0], "answer_preview": r[1][:200],
+                "confidence": r[2], "faithfulness": r[3], "verdict": r[4],
+                "sources": json.loads(r[5]) if r[5] else [],
+                "safety_issues": json.loads(r[6]) if r[6] else [],
+                "model": r[7], "created_at": r[8],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 # ── PHASE 1: Role assignment endpoint ────────────────────────────────────────
 _VALID_ROLES = {"employee", "manager", "hr_admin"}
 

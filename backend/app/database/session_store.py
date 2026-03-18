@@ -100,6 +100,22 @@ CREATE TABLE IF NOT EXISTS security_events (
     tenant_id TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_ts ON security_events(timestamp);
+CREATE TABLE IF NOT EXISTS response_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    faithfulness REAL DEFAULT 0.0,
+    verdict TEXT DEFAULT '',
+    sources_used TEXT DEFAULT '[]',
+    safety_issues TEXT DEFAULT '[]',
+    model TEXT DEFAULT '',
+    version INTEGER DEFAULT 1,
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
+);
+CREATE INDEX IF NOT EXISTS idx_resp_versions_session ON response_versions(session_id);
 CREATE TABLE IF NOT EXISTS refresh_tokens (
     token TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

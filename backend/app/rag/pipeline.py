@@ -292,8 +292,20 @@ class RAGPipeline:
         verification = self.verifier.verify(answer_text, chunks, query)
         answer = handle_ungrounded(verification, answer_text)
 
+        # ── Stage 4b: Content safety filter ──────────────────────────────
+        from backend.app.core.content_safety import check_content_safety, sanitize_response
+        safety = check_content_safety(answer)
+        answer = sanitize_response(answer)
+        flagged = not safety["safe"]
+
+        # ── Stage 4c: PII scrubbing on outbound response ────────────────
+        answer = mask_pii(answer)
+
         ms = (time.time() - t0) * 1000
         self._log(query, analysis.query_type, user_role, verification, ms, chunks)
+
+        # ── Stage 4d: Response versioning (audit trail) ──────────────────
+        self._store_version(query, answer, verification, safety, chunks)
 
         # Log source documents used — verify correct docs are retrieved
         sources_used = list({c.source for c in chunks})
@@ -321,10 +333,32 @@ class RAGPipeline:
             faithfulness_score=verification.faithfulness_score,
             query_type=analysis.query_type,
             latency_ms=ms,
+            flagged=flagged,
             chunks=chunks,
             verification=verification,
             suggested_questions=suggestions,
         )
+
+    def _store_version(self, query, answer, verification, safety, chunks):
+        """Store response version for audit trail (Phase 3)."""
+        try:
+            import hashlib
+            import json as _json
+            query_hash = hashlib.sha256(mask_pii(query).encode()).hexdigest()[:16]
+            sources = list({c.source for c in chunks}) if chunks else []
+            with sqlite3.connect(self.s.db_path) as con:
+                con.execute(
+                    "INSERT INTO response_versions "
+                    "(session_id, query_hash, answer, confidence, faithfulness, verdict, "
+                    "sources_used, safety_issues, model, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ("", query_hash, answer[:2000], verification.faithfulness_score,
+                     verification.faithfulness_score, verification.verdict,
+                     _json.dumps(sources), _json.dumps(safety.get("issues", [])),
+                     self.s.llm_model, time.time()),
+                )
+        except Exception as e:
+            logger.warning("response_version_failed", error=str(e))
 
     def _log(self, query, qtype, role, v, ms, chunks):
         try:
