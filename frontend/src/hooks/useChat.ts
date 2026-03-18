@@ -21,13 +21,12 @@ export function useChat(token: string) {
     setLoading(true)
     setStreamingText('')
 
-    // Create a placeholder for streaming
     const botId = crypto.randomUUID()
     streamIdRef.current = botId
 
     try {
-      // Try streaming first, fall back to non-streaming
       let streamWorked = false
+
       await sendMessageStream(
         token, query, sessionId,
         (token_chunk) => {
@@ -35,8 +34,9 @@ export function useChat(token: string) {
           setStreamingText(prev => prev + token_chunk)
         },
         (doneData: StreamDoneData) => {
-          // Stream complete — add final message with citations + confidence
           setStreamingText('')
+          // Capture session_id from streaming response
+          if (doneData.session_id) setSessionId(doneData.session_id)
           if (doneData.full_text) {
             setMessages(prev => [...prev, {
               id: botId, role: 'assistant', content: doneData.full_text,
@@ -52,9 +52,9 @@ export function useChat(token: string) {
       )
 
       if (!streamWorked) {
-        // Fallback to non-streaming
+        // Fallback to non-streaming — this returns the session_id
         const data = await sendMessage(token, query, sessionId)
-        setSessionId(data.session_id)
+        if (data.session_id) setSessionId(data.session_id)
         setMessages(prev => [...prev, {
           id: botId, role: 'assistant', content: data.answer,
           citations: data.citations, confidence: data.confidence,
@@ -64,6 +64,7 @@ export function useChat(token: string) {
           timestamp: Date.now(),
         }])
       }
+
     } catch {
       setStreamingText('')
       setMessages(prev => [

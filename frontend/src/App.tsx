@@ -15,6 +15,7 @@ export default function App() {
   const [page, setPage] = useState('chat')
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSession, setActiveSession] = useState<string | null>(null)
+  const [chatKey, setChatKey] = useState(0)  // Force re-mount ChatPage on New Chat
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleLogin = useCallback((a: AuthState) => {
@@ -118,15 +119,25 @@ export default function App() {
     }
   }, [auth.token, handleLogout])
 
-  // Load sessions
-  useEffect(() => {
+  // Load sessions — on login, session change, and periodically
+  const refreshSessions = useCallback(() => {
     if (auth.token) {
       getSessions(auth.token).then(d => setSessions(d.sessions || [])).catch(() => {})
     }
-  }, [auth.token, activeSession])
+  }, [auth.token])
+
+  useEffect(() => { refreshSessions() }, [refreshSessions, activeSession])
+
+  // Refresh sessions every 10 seconds so new chats appear in sidebar
+  useEffect(() => {
+    if (!auth.token) return
+    const interval = setInterval(refreshSessions, 10000)
+    return () => clearInterval(interval)
+  }, [auth.token, refreshSessions])
 
   const handleNewChat = () => {
     setActiveSession(null)
+    setChatKey(k => k + 1)  // Force ChatPage to re-mount with fresh state
     setPage('chat')
   }
 
@@ -148,7 +159,7 @@ export default function App() {
       />
       <main className="flex-1 flex flex-col min-w-0">
         {page === 'chat' && (
-          <ChatPage token={auth.token} sessionId={activeSession} onSessionChange={setActiveSession} />
+          <ChatPage key={chatKey} token={auth.token} sessionId={activeSession} onSessionChange={setActiveSession} />
         )}
         {page === 'admin' && (
           <AdminDashboard token={auth.token} />

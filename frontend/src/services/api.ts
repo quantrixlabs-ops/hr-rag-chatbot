@@ -181,6 +181,7 @@ export async function getSecurityEvents(token: string) {
 // ── Streaming Chat ─────────────────────────────────────────────────────────
 export interface StreamDoneData {
   full_text: string
+  session_id?: string
   citations?: { source: string; page: number | null; excerpt: string }[]
   confidence?: number
   faithfulness_score?: number
@@ -220,9 +221,11 @@ export async function sendMessageStream(
           if (data.done) {
             onDone({
               full_text: data.full_text || '',
+              session_id: data.session_id,
               citations: data.citations,
               confidence: data.confidence,
               faithfulness_score: data.faithfulness_score,
+              suggested_questions: data.suggested_questions,
             })
           }
         }

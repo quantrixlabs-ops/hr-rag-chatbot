@@ -141,19 +141,30 @@ async def chat_query_stream(req: ChatQueryRequest, user: User = Depends(get_curr
     reg = get_registry()
     s = get_settings()
     from backend.app.core.security import get_allowed_roles
-    from backend.app.rag.context_builder import ContextBuilder
     from backend.app.prompts.system_prompt import filter_prompt_leakage
     from backend.app.rag.pipeline import _build_prompt
+
+    # Create or load session (same as non-streaming path)
+    ss = reg["session_store"]
+    if req.session_id:
+        session = ss.get_session(req.session_id)
+        if not session:
+            session = ss.create_session(user.user_id, user.role)
+    else:
+        session = ss.create_session(user.user_id, user.role)
 
     role_filter = get_allowed_roles(user.role)
     chunks, _ = reg["retrieval"].retrieve(query, role_filter=role_filter)
     if not chunks:
         async def empty_gen():
-            yield f"data: {json.dumps({'token': 'No HR documents found. Please contact HR directly.', 'done': True})}\n\n"
+            yield f"data: {json.dumps({'token': 'No HR documents found. Please contact HR directly.', 'done': True, 'session_id': session.session_id})}\n\n"
         return StreamingResponse(empty_gen(), media_type="text/event-stream")
 
     context = reg["ctx"].build(chunks)
     prompt = _build_prompt(query, context, company=s.company_name, hr_contact=s.hr_contact_email)
+
+    # Save user turn before streaming
+    ss.add_turn(session.session_id, "user", query)
 
     async def token_generator():
         full_text = ""
@@ -169,9 +180,11 @@ async def chat_query_stream(req: ChatQueryRequest, user: User = Depends(get_curr
             {"source": c.source, "page": c.page, "excerpt": c.text_excerpt}
             for c in verification.citations
         ]
-        # Generate follow-up suggestions from chunks
+        # Save assistant turn
+        ss.add_turn(session.session_id, "assistant", filtered)
+
         from backend.app.rag.pipeline import RAGPipeline
         suggestions = RAGPipeline._generate_suggestions(None, query, filtered, chunks)
-        yield f"data: {json.dumps({'token': '', 'done': True, 'full_text': filtered, 'citations': citations, 'confidence': round(verification.faithfulness_score, 3), 'faithfulness_score': round(verification.faithfulness_score, 3), 'suggested_questions': suggestions})}\n\n"
+        yield f"data: {json.dumps({'token': '', 'done': True, 'full_text': filtered, 'session_id': session.session_id, 'citations': citations, 'confidence': round(verification.faithfulness_score, 3), 'faithfulness_score': round(verification.faithfulness_score, 3), 'suggested_questions': suggestions})}\n\n"
 
     return StreamingResponse(token_generator(), media_type="text/event-stream")
