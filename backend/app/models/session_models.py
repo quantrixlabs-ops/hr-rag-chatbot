@@ -36,3 +36,4 @@ class ChatResult:
     flagged: bool = False
     chunks: list = field(default_factory=list)
     verification: Optional[object] = None
+    suggested_questions: list = field(default_factory=list)

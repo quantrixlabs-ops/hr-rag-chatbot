@@ -13,6 +13,7 @@ export interface ChatMessage {
   faithfulness_score?: number
   query_type?: string
   latency_ms?: number
+  suggested_questions?: string[]
   timestamp: number
 }
 

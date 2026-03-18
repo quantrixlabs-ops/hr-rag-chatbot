@@ -66,6 +66,9 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
                     if (userMsg) onFeedback(userMsg.content, msg.content, rating)
                   }
                 : undefined}
+              onSuggestedClick={msg.role === 'assistant' && i === messages.length - 1 && !loading
+                ? (q) => onSend(q)
+                : undefined}
             />
           ))}
           {loading && streamingText && (

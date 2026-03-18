@@ -46,22 +46,55 @@ def _build_prompt(
     turns: Optional[list[ConversationTurn]] = None,
     company: str = "Acme Corp",
     hr_contact: str = "your HR department",
+    user_role: str = "employee",
+    department: Optional[str] = None,
 ) -> str:
     history = ""
     if turns:
-        # Limit to last 3 turns and truncate each to prevent context flooding
-        for t in turns[-3:]:
-            label = "Employee" if t.role == "user" else "HR Assistant"
-            # Truncate long turn content to prevent old answers dominating the prompt
-            content = t.content[:300] if t.role == "assistant" else t.content[:200]
-            history += f"{label}: {content}\n"
+        # Summarize if too many turns; otherwise include last 3
+        if len(turns) > 6:
+            history = _summarize_history(turns)
+        else:
+            for t in turns[-3:]:
+                label = "Employee" if t.role == "user" else "HR Assistant"
+                content = t.content[:300] if t.role == "assistant" else t.content[:200]
+                history += f"{label}: {content}\n"
+
+    # Personalization context based on role and department
+    personalization = ""
+    if department:
+        personalization += f"\nThe employee asking is from the {department} department."
+    if user_role == "manager":
+        personalization += "\nThis is a manager — they may need team-level policy details."
+    elif user_role == "hr_admin":
+        personalization += "\nThis is an HR administrator — provide detailed policy references."
+
     prompt = SYSTEM_PROMPT.format(
         company_name=company,
         hr_contact=hr_contact,
         context=context,
         conversation_history=history or "(Start of conversation)",
     )
+    if personalization:
+        prompt += personalization
     return prompt + f"\nEmployee: {query}\nHR Assistant:"
+
+
+def _summarize_history(turns: list[ConversationTurn]) -> str:
+    """Compress long conversation history into a brief summary."""
+    user_topics = []
+    for t in turns:
+        if t.role == "user":
+            user_topics.append(t.content[:80])
+    if not user_topics:
+        return "(Start of conversation)"
+    recent = turns[-2:]
+    summary = f"(Previous topics discussed: {'; '.join(user_topics[:-2])})\n"
+    for t in recent:
+        label = "Employee" if t.role == "user" else "HR Assistant"
+        content = t.content[:300] if t.role == "assistant" else t.content[:200]
+        summary += f"{label}: {content}\n"
+    return summary
 
 
 def _inject_context(query: str, turns: list[ConversationTurn]) -> str:
@@ -124,11 +157,47 @@ class RAGPipeline:
             pass  # Fall back to original query
         return query
 
+    def _generate_suggestions(self, query: str, answer: str, chunks: list) -> list:
+        """Generate 2-3 follow-up question suggestions based on the answer and sources."""
+        sources = list({c.source for c in chunks})
+        topics_in_chunks = set()
+        for c in chunks:
+            text_lower = c.text.lower()
+            for topic, keywords in [
+                ("leave", ["leave", "vacation", "pto", "time off"]),
+                ("benefits", ["benefit", "insurance", "401k", "health"]),
+                ("performance", ["performance", "review", "evaluation"]),
+                ("onboarding", ["onboarding", "new hire", "first day"]),
+                ("remote work", ["remote", "work from home", "hybrid"]),
+                ("compensation", ["salary", "pay", "bonus", "raise"]),
+            ]:
+                if any(kw in text_lower for kw in keywords):
+                    topics_in_chunks.add(topic)
+
+        # Generate contextual suggestions based on what was discussed
+        suggestions = []
+        query_lower = query.lower()
+        if "leave" in query_lower or "leave" in topics_in_chunks:
+            suggestions.extend(["How do I request time off?", "Does unused leave carry over?"])
+        if "benefit" in query_lower or "benefits" in topics_in_chunks:
+            suggestions.extend(["What health insurance plans are available?", "How does the 401k matching work?"])
+        if "performance" in query_lower or "performance" in topics_in_chunks:
+            suggestions.extend(["When are performance reviews conducted?", "What are the promotion criteria?"])
+        if "remote" in query_lower or "remote work" in topics_in_chunks:
+            suggestions.extend(["What equipment is provided for remote workers?", "What are the core hours?"])
+        if "onboarding" in query_lower or "onboarding" in topics_in_chunks:
+            suggestions.extend(["What happens on my first day?", "When do benefits start?"])
+
+        # Filter out the question that was just asked and limit to 3
+        suggestions = [s for s in suggestions if s.lower() != query_lower]
+        return suggestions[:3]
+
     def query(
         self,
         query: str,
         user_role: str,
         session_turns: Optional[list[ConversationTurn]] = None,
+        department: Optional[str] = None,
     ) -> ChatResult:
         t0 = time.time()
         analysis = self.qa.analyze(query)
@@ -163,11 +232,12 @@ class RAGPipeline:
                 faithfulness_score=0.0, query_type=analysis.query_type, latency_ms=ms,
             )
 
-        # ── Stage 2: Context + Prompt ────────────────────────────────────
+        # ── Stage 2: Context + Prompt (with personalization) ─────────────
         context = self.ctx.build(chunks)
         prompt = _build_prompt(
             query, context, session_turns,
             self.s.company_name, self.s.hr_contact_email,
+            user_role, department,
         )
 
         # ── Stage 3: LLM Generation ─────────────────────────────────────
@@ -209,6 +279,9 @@ class RAGPipeline:
             latency_ms=round(ms),
         )
 
+        # ── Stage 5: Generate follow-up suggestions ─────────────────────
+        suggestions = self._generate_suggestions(query, answer, chunks)
+
         return ChatResult(
             answer=answer,
             session_id="",
@@ -219,6 +292,7 @@ class RAGPipeline:
             latency_ms=ms,
             chunks=chunks,
             verification=verification,
+            suggested_questions=suggestions,
         )
 
     def _log(self, query, qtype, role, v, ms, chunks):

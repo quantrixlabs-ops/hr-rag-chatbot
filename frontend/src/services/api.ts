@@ -178,6 +178,7 @@ export interface StreamDoneData {
   citations?: { source: string; page: number | null; excerpt: string }[]
   confidence?: number
   faithfulness_score?: number
+  suggested_questions?: string[]
 }
 
 export async function sendMessageStream(

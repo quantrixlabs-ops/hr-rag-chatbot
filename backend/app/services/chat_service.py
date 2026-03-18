@@ -59,7 +59,7 @@ class ChatService:
 
         # RAG pipeline with error boundary
         try:
-            result = self.rag.query(query=query, user_role=user.role, session_turns=recent)
+            result = self.rag.query(query=query, user_role=user.role, session_turns=recent, department=user.department)
         except Exception as e:
             logger.error("rag_pipeline_error", error=str(e), user_id=user.user_id)
             ms = (time.time() - t0) * 1000

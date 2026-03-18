@@ -36,6 +36,7 @@ class ChatQueryResponse(BaseModel):
     query_type: str = "factual"
     latency_ms: float = 0.0
     flagged: bool = False
+    suggested_questions: List[str] = []
 
 
 class FeedbackRating(str, Enum):

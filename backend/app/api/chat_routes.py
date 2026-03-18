@@ -78,6 +78,7 @@ async def chat_query(req: ChatQueryRequest, user: User = Depends(get_current_use
         answer=result.answer, session_id=result.session_id, citations=citations,
         confidence=result.confidence, faithfulness_score=result.faithfulness_score,
         query_type=result.query_type, latency_ms=result.latency_ms, flagged=result.flagged,
+        suggested_questions=result.suggested_questions,
     )
 
 
@@ -155,6 +156,9 @@ async def chat_query_stream(req: ChatQueryRequest, user: User = Depends(get_curr
             {"source": c.source, "page": c.page, "excerpt": c.text_excerpt}
             for c in verification.citations
         ]
-        yield f"data: {json.dumps({'token': '', 'done': True, 'full_text': filtered, 'citations': citations, 'confidence': round(verification.faithfulness_score, 3), 'faithfulness_score': round(verification.faithfulness_score, 3)})}\n\n"
+        # Generate follow-up suggestions from chunks
+        from backend.app.rag.pipeline import RAGPipeline
+        suggestions = RAGPipeline._generate_suggestions(None, query, filtered, chunks)
+        yield f"data: {json.dumps({'token': '', 'done': True, 'full_text': filtered, 'citations': citations, 'confidence': round(verification.faithfulness_score, 3), 'faithfulness_score': round(verification.faithfulness_score, 3), 'suggested_questions': suggestions})}\n\n"
 
     return StreamingResponse(token_generator(), media_type="text/event-stream")

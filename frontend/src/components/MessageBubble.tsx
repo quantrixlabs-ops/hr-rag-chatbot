@@ -4,6 +4,7 @@ import type { ChatMessage } from '../types/chat'
 interface Props {
   message: ChatMessage
   onFeedback?: (rating: string) => void
+  onSuggestedClick?: (question: string) => void
 }
 
 function ConfidenceBadge({ score }: { score: number }) {
@@ -21,7 +22,7 @@ function ConfidenceBadge({ score }: { score: number }) {
   )
 }
 
-export default function MessageBubble({ message, onFeedback }: Props) {
+export default function MessageBubble({ message, onFeedback, onSuggestedClick }: Props) {
   const isUser = message.role === 'user'
 
   // Resolve confidence: prefer explicit field, never show 0% when we have citations
@@ -73,6 +74,18 @@ export default function MessageBubble({ message, onFeedback }: Props) {
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Suggested follow-up questions */}
+            {!isUser && message.suggested_questions && message.suggested_questions.length > 0 && onSuggestedClick && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {message.suggested_questions.map((q, i) => (
+                  <button key={i} onClick={() => onSuggestedClick(q)}
+                    className="text-xs bg-blue-50 text-blue-600 border border-blue-200 rounded-lg px-2.5 py-1 hover:bg-blue-100 transition-colors">
+                    {q}
+                  </button>
+                ))}
               </div>
             )}
           </div>
