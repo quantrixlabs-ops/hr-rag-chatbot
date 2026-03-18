@@ -13,7 +13,7 @@ from starlette.responses import StreamingResponse
 from backend.app.core.config import get_settings
 from backend.app.core.dependencies import get_registry
 from backend.app.core.security import get_current_user, sanitize_query, check_prompt_injection, mask_pii
-from backend.app.models.chat_models import ChatQueryRequest, ChatQueryResponse, CitationOut, FeedbackRequest, User
+from backend.app.models.chat_models import ChatQueryRequest, ChatQueryResponse, CitationOut, FeedbackRequest, RetrievalTrace, User
 from backend.app.services.chat_service import ChatService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -74,11 +74,24 @@ async def chat_query(req: ChatQueryRequest, user: User = Depends(get_current_use
     svc = _chat_service()
     result = svc.handle_query(req.query.strip(), user, req.session_id)
     citations = [CitationOut(source=c.source, page=c.page, excerpt=c.text_excerpt) for c in result.citations] if req.include_sources else []
+    # Build explainability trace if requested
+    trace = None
+    if req.include_trace:
+        trace = RetrievalTrace(
+            query_type=result.query_type,
+            detected_topics=list({c.source.split(".")[0] for c in result.chunks}) if result.chunks else [],
+            chunks_retrieved=len(result.chunks),
+            top_sources=list({c.source for c in result.chunks})[:5] if result.chunks else [],
+            top_chunk_score=round(result.chunks[0].score, 3) if result.chunks else 0.0,
+            verdict=result.verification.verdict if result.verification else "",
+        )
+
     return ChatQueryResponse(
         answer=result.answer, session_id=result.session_id, citations=citations,
         confidence=result.confidence, faithfulness_score=result.faithfulness_score,
         query_type=result.query_type, latency_ms=result.latency_ms, flagged=result.flagged,
         suggested_questions=result.suggested_questions,
+        trace=trace,
     )
 
 

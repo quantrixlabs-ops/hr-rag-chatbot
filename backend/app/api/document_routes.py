@@ -162,6 +162,15 @@ async def upload(
     if not title:
         raise HTTPException(400, "Document title cannot be empty")
 
+    # Auto-classify document category if set to "auto" or default "policy"
+    if category in ("auto", "policy"):
+        from backend.app.rag.query_analyzer import auto_classify_document
+        content_preview = content.decode("utf-8", errors="ignore")[:1000]
+        detected = auto_classify_document(title, content_preview)
+        if detected != "policy" or category == "auto":
+            category = detected
+            logger.info("document_auto_classified", title=title, category=category)
+
     # If replacing an old version, remove it from FAISS + DB first
     if old_doc_id_to_replace:
         _remove_document_chunks(old_doc_id_to_replace, s)

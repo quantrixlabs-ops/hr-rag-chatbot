@@ -202,7 +202,38 @@ class RAGPipeline:
         t0 = time.time()
         analysis = self.qa.analyze(query)
 
-        # ── Stage 0: Ambiguity Detection ─────────────────────────────────
+        # ── Stage -1: Smart routing — redirect non-HR queries ────────────
+        if analysis.domain in ("it", "personal") and analysis.redirect_message:
+            ms = (time.time() - t0) * 1000
+            logger.info("query_routed", domain=analysis.domain, query=query[:80])
+            return ChatResult(
+                answer=analysis.redirect_message,
+                session_id="", citations=[], confidence=1.0,
+                faithfulness_score=1.0, query_type="redirect", latency_ms=ms,
+            )
+        if analysis.domain == "greeting":
+            ms = (time.time() - t0) * 1000
+            return ChatResult(
+                answer="Hello! I'm your HR assistant. I can help with questions about company policies, "
+                       "benefits, leave, onboarding, and more. What would you like to know?",
+                session_id="", citations=[], confidence=1.0,
+                faithfulness_score=1.0, query_type="greeting", latency_ms=ms,
+            )
+
+        # ── Stage 0: Language check ──────────────────────────────────────
+        if analysis.language != "en":
+            ms = (time.time() - t0) * 1000
+            lang_names = {"es": "Spanish", "fr": "French", "de": "German", "zh": "Chinese",
+                          "ja": "Japanese", "ko": "Korean", "ar": "Arabic", "hi": "Hindi", "ta": "Tamil"}
+            lang_name = lang_names.get(analysis.language, analysis.language)
+            return ChatResult(
+                answer=f"I detected your query may be in {lang_name}. Currently I support English only. "
+                       "Please rephrase your question in English and I'll be happy to help.",
+                session_id="", citations=[], confidence=1.0,
+                faithfulness_score=1.0, query_type="language_unsupported", latency_ms=ms,
+            )
+
+        # ── Stage 1: Ambiguity Detection ─────────────────────────────────
         if analysis.is_ambiguous and analysis.clarification_prompt:
             ms = (time.time() - t0) * 1000
             logger.info("ambiguous_query_detected", query=query[:80], topics=analysis.detected_topics)

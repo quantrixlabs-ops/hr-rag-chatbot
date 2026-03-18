@@ -27,6 +27,18 @@ class CitationOut(BaseModel):
     excerpt: str = ""
 
 
+class RetrievalTrace(BaseModel):
+    """Explainability trace — shows WHY this answer was generated."""
+    query_type: str = ""
+    detected_topics: List[str] = []
+    domain: str = "hr"
+    language: str = "en"
+    chunks_retrieved: int = 0
+    top_sources: List[str] = []
+    top_chunk_score: float = 0.0
+    verdict: str = ""
+
+
 class ChatQueryResponse(BaseModel):
     answer: str
     session_id: str
@@ -37,6 +49,7 @@ class ChatQueryResponse(BaseModel):
     latency_ms: float = 0.0
     flagged: bool = False
     suggested_questions: List[str] = []
+    trace: Optional[RetrievalTrace] = None
 
 
 class FeedbackRating(str, Enum):
