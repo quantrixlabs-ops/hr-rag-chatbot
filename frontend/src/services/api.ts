@@ -37,7 +37,6 @@ export interface RegisterData {
   full_name?: string
   email?: string
   phone?: string
-  role?: string
 }
 
 export async function register(data: RegisterData) {
@@ -175,6 +174,65 @@ export async function getFailedQueries(token: string) {
 export async function getSecurityEvents(token: string) {
   const res = await handleResponse(await fetch(`${BASE}/admin/security-events`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch security events')
+  return res.json()
+}
+
+// ── Escalation ─────────────────────────────────────────────────────────────
+export async function escalateToHR(token: string, query: string, answer: string, sessionId?: string | null, reason?: string) {
+  const res = await handleResponse(await fetch(`${BASE}/chat/escalate`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ query, answer, session_id: sessionId, reason: reason || 'User requested human assistance' }),
+  }))
+  if (!res.ok) throw new Error('Escalation failed')
+  return res.json()
+}
+
+// ── Saved Prompts ──────────────────────────────────────────────────────────
+export async function getSavedPrompts(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/chat/saved-prompts`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch saved prompts')
+  return res.json()
+}
+
+export async function savePrompt(token: string, title: string, promptText: string) {
+  const res = await handleResponse(await fetch(`${BASE}/chat/saved-prompts`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ title, prompt_text: promptText }),
+  }))
+  if (!res.ok) throw new Error('Failed to save prompt')
+  return res.json()
+}
+
+export async function deleteSavedPrompt(token: string, promptId: number) {
+  const res = await handleResponse(await fetch(`${BASE}/chat/saved-prompts/${promptId}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete prompt')
+  return res.json()
+}
+
+// ── Admin: Pending Users ───────────────────────────────────────────────────
+export async function getPendingUsers(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/admin/users/pending`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch pending users')
+  return res.json()
+}
+
+export async function approveUser(token: string, userId: string, action: 'approve' | 'reject', role: string = 'employee') {
+  const res = await handleResponse(await fetch(`${BASE}/admin/users/${userId}/approve`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ action, role }),
+  }))
+  if (!res.ok) throw new Error('Approval action failed')
+  return res.json()
+}
+
+export async function suspendUser(token: string, userId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/admin/users/${userId}/suspend`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({}),
+  }))
+  if (!res.ok) throw new Error('Suspend action failed')
   return res.json()
 }
 

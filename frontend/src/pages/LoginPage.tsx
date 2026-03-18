@@ -22,7 +22,6 @@ export default function LoginPage({ onLogin }: Props) {
   const [regName, setRegName] = useState('')
   const [regEmail, setRegEmail] = useState('')
   const [regPhone, setRegPhone] = useState('')
-  const [regRole, setRegRole] = useState('employee')
   const [regUser, setRegUser] = useState('')
   const [regPass, setRegPass] = useState('')
   const [regConfirm, setRegConfirm] = useState('')
@@ -58,18 +57,14 @@ export default function LoginPage({ onLogin }: Props) {
         full_name: regName,
         email: regEmail,
         phone: regPhone,
-        role: regRole,
       })
       // Registration successful — redirect to login form
-      setSuccess('Account created successfully! Please sign in.')
+      setSuccess('Account created! Your registration is pending admin approval.')
       setIsRegister(false)
-      // Pre-fill the login username for convenience
       setLoginUser(regUser)
       setLoginPass('')
-      // Clear register fields
       setRegName(''); setRegEmail(''); setRegPhone('')
       setRegUser(''); setRegPass(''); setRegConfirm('')
-      setRegRole('employee')
     } catch (err: any) {
       setError(err.message || 'Registration failed')
     } finally {
@@ -151,21 +146,11 @@ export default function LoginPage({ onLogin }: Props) {
                 className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm" />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Phone Number</label>
-                <input type="tel" value={regPhone} onChange={e => setRegPhone(e.target.value)}
-                  placeholder="+1 555-123-4567"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm" />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Role</label>
-                <select value={regRole} onChange={e => setRegRole(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm bg-white">
-                  <option value="employee">Employee</option>
-                  <option value="hr_admin">Admin</option>
-                </select>
-              </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Phone Number</label>
+              <input type="tel" value={regPhone} onChange={e => setRegPhone(e.target.value)}
+                placeholder="+1 555-123-4567"
+                className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm" />
             </div>
 
             <div>

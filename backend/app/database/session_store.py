@@ -61,6 +61,33 @@ CREATE TABLE IF NOT EXISTS users (
     hashed_password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'employee',
     department TEXT, created_at REAL NOT NULL,
     full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '',
+    tenant_id TEXT DEFAULT 'default',
+    status TEXT DEFAULT 'pending_approval',
+    email_verified INTEGER DEFAULT 0,
+    verification_token TEXT DEFAULT '',
+    suspended INTEGER DEFAULT 0,
+    totp_secret TEXT DEFAULT '',
+    totp_enabled INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS saved_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    prompt_text TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
+);
+CREATE TABLE IF NOT EXISTS escalations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    session_id TEXT,
+    query TEXT NOT NULL,
+    answer TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    status TEXT DEFAULT 'open',
+    assigned_to TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    resolved_at REAL,
     tenant_id TEXT DEFAULT 'default'
 );
 CREATE TABLE IF NOT EXISTS security_events (
@@ -129,6 +156,17 @@ def _run_migrations(con: sqlite3.Connection) -> None:
     for table in _tenant_tables:
         if not _has_column(table, "tenant_id"):
             con.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+
+    # Migration: User status/approval workflow (Phase 0)
+    for col, default in [("status", "'active'"), ("email_verified", "0"),
+                         ("verification_token", "''"), ("suspended", "0")]:
+        if not _has_column("users", col):
+            con.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT DEFAULT {default}" if col in ("status", "verification_token")
+                        else f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT {default}")
+
+    # Migration: Document sensitivity classification
+    if not _has_column("documents", "sensitivity"):
+        con.execute("ALTER TABLE documents ADD COLUMN sensitivity TEXT DEFAULT 'internal'")
 
 
 class SessionStore:

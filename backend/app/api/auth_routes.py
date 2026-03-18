@@ -129,11 +129,23 @@ async def login(req: LoginRequest, request: Request):
 
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
-        row = con.execute("SELECT user_id,hashed_password,role,department FROM users WHERE username=?", (username,)).fetchone()
+        row = con.execute(
+            "SELECT user_id,hashed_password,role,department,status,suspended FROM users WHERE username=?",
+            (username,)
+        ).fetchone()
     if not row or not verify_password(req.password, row[1]):
         _record_failed_login(username)
         logger.warning("login_failed", username=username, ip=client_ip)
         raise HTTPException(401, "Invalid credentials")
+
+    # Check account status
+    user_status = row[4] if len(row) > 4 else "active"
+    is_suspended = row[5] if len(row) > 5 else 0
+    if is_suspended:
+        raise HTTPException(403, "Your account has been suspended. Please contact HR.")
+    if user_status == "pending_approval":
+        raise HTTPException(403, "Your account is pending admin approval. Please wait for an administrator to approve your registration.")
+
     logger.info("login_success", user_id=row[0], role=row[2], ip=client_ip)
     token = create_access_token(row[0], row[2], row[3])
     refresh = create_refresh_token(row[0])
@@ -163,8 +175,10 @@ async def register(req: RegisterRequest, request: Request):
 
     s = get_settings()
     uid = str(uuid.uuid4())
-    # Validate role — only allow employee/hr_admin
-    role = req.role if req.role in ("employee", "hr_admin") else "employee"
+    # All new registrations are pending_approval — admin must approve
+    role = "employee"
+    status = "pending_approval"
+    verification_token = str(uuid.uuid4())
     # Sanitize profile fields
     import html as _html
     full_name = _html.escape(req.full_name.strip(), quote=True)[:100]
@@ -173,12 +187,18 @@ async def register(req: RegisterRequest, request: Request):
     try:
         with sqlite3.connect(s.db_path) as con:
             con.execute(
-                "INSERT INTO users (user_id,username,hashed_password,role,department,created_at,full_name,email,phone) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
-                (uid, username, hash_password(req.password), role, req.department, time.time(), full_name, email, phone))
+                "INSERT INTO users (user_id,username,hashed_password,role,department,created_at,"
+                "full_name,email,phone,status,verification_token) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (uid, username, hash_password(req.password), role, req.department, time.time(),
+                 full_name, email, phone, status, verification_token))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Username already exists")
-    return {"user_id": uid, "username": username, "role": role}
+    log_security_event("user_registered", {"username": username, "status": status}, user_id=uid)
+    return {
+        "user_id": uid, "username": username, "role": role, "status": status,
+        "message": "Registration successful. Your account is pending admin approval.",
+    }
 
 
 _logout_bearer = HTTPBearer(auto_error=False)

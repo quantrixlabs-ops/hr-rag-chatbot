@@ -1,6 +1,6 @@
 import ChatWindow from '../components/ChatWindow'
 import { useChat } from '../hooks/useChat'
-import { sendFeedback, getSessionHistory } from '../services/api'
+import { sendFeedback, getSessionHistory, escalateToHR } from '../services/api'
 import { useEffect } from 'react'
 import type { ChatMessage } from '../types/chat'
 
@@ -44,6 +44,15 @@ export default function ChatPage({ token, sessionId, onSessionChange }: Props) {
     }
   }
 
+  const handleEscalate = async (query: string, answer: string) => {
+    try {
+      await escalateToHR(token, query, answer, chat.sessionId)
+      alert('Your question has been escalated to an HR representative. You will receive a response shortly.')
+    } catch {
+      alert('Failed to escalate. Please try again.')
+    }
+  }
+
   return (
     <ChatWindow
       messages={chat.messages}
@@ -51,6 +60,7 @@ export default function ChatPage({ token, sessionId, onSessionChange }: Props) {
       streamingText={chat.streamingText}
       onSend={chat.send}
       onFeedback={handleFeedback}
+      onEscalate={handleEscalate}
       token={token}
     />
   )

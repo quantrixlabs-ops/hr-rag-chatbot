@@ -117,9 +117,19 @@ def client(settings):
             yield c
 
 
+def _approve_user(username):
+    """Approve a pending user in DB (for testing)."""
+    import sqlite3
+    from backend.app.core.config import get_settings
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        con.execute("UPDATE users SET status='active' WHERE username=?", (username,))
+
+
 def _register_and_login(client, username="testuser1", password=VALID_PASSWORD):
-    """Helper: register + login, return (token, headers)."""
+    """Helper: register + approve + login, return (token, headers)."""
     client.post("/auth/register", json={"username": username, "password": password})
+    _approve_user(username)
     r = client.post("/auth/login", json={"username": username, "password": password})
     token = r.json()["access_token"]
     return token, {"Authorization": f"Bearer {token}"}
@@ -137,9 +147,15 @@ def test_health(client):
     assert "version" not in data
 
 
-def test_register_login(client):
+def test_register_login(client, settings):
     r = client.post("/auth/register", json={"username": "user1", "password": VALID_PASSWORD})
     assert r.status_code == 201
+    assert r.json()["status"] == "pending_approval"
+    # Login should fail while pending
+    r = client.post("/auth/login", json={"username": "user1", "password": VALID_PASSWORD})
+    assert r.status_code == 403
+    # Approve user, then login succeeds
+    _approve_user("user1")
     r = client.post("/auth/login", json={"username": "user1", "password": VALID_PASSWORD})
     assert r.status_code == 200
     assert "access_token" in r.json()
@@ -156,14 +172,12 @@ def test_chat_requires_auth(client):
 
 # ── BUG-001: Role self-assignment blocked ────────────────────────────────────
 
-def test_register_accepts_valid_roles(client):
-    """Registration accepts employee and hr_admin roles; rejects invalid ones."""
+def test_register_always_pending_employee(client):
+    """Registration always assigns employee role and pending_approval status, regardless of input."""
     r = client.post("/auth/register", json={"username": "sneaky1", "password": VALID_PASSWORD, "role": "hr_admin"})
     assert r.status_code == 201
-    assert r.json()["role"] == "hr_admin"
-    r2 = client.post("/auth/register", json={"username": "sneaky2", "password": VALID_PASSWORD, "role": "superuser"})
-    assert r2.status_code == 201
-    assert r2.json()["role"] == "employee"  # Invalid role falls back to employee
+    assert r.json()["role"] == "employee"  # Role field is ignored
+    assert r.json()["status"] == "pending_approval"
 
 
 # ── Auth validation ──────────────────────────────────────────────────────────
@@ -504,8 +518,9 @@ def test_admin_role_assignment(client, settings):
     with sqlite3.connect(settings.db_path) as con:
         target_row = con.execute("SELECT user_id FROM users WHERE username='targetuser1'").fetchone()
         admin_row = con.execute("SELECT user_id FROM users WHERE username='adminuser1'").fetchone()
-        # Promote adminuser1 to hr_admin directly in DB (simulating an existing admin)
-        con.execute("UPDATE users SET role='hr_admin' WHERE user_id=?", (admin_row[0],))
+        # Promote adminuser1 to hr_admin + activate both users
+        con.execute("UPDATE users SET role='hr_admin', status='active' WHERE user_id=?", (admin_row[0],))
+        con.execute("UPDATE users SET status='active' WHERE user_id=?", (target_row[0],))
     # Login as admin
     r = client.post("/auth/login", json={"username": "adminuser1", "password": VALID_PASSWORD})
     admin_token = r.json()["access_token"]
@@ -528,7 +543,7 @@ def test_admin_role_assignment_invalid_role(client, settings):
     client.post("/auth/register", json={"username": "admin2", "password": VALID_PASSWORD})
     with sqlite3.connect(settings.db_path) as con:
         admin_id = con.execute("SELECT user_id FROM users WHERE username='admin2'").fetchone()[0]
-        con.execute("UPDATE users SET role='hr_admin' WHERE user_id=?", (admin_id,))
+        con.execute("UPDATE users SET role='hr_admin', status='active' WHERE user_id=?", (admin_id,))
         # Create another user to be the target
         import uuid, time as _t
         target_id = str(uuid.uuid4())
@@ -545,9 +560,10 @@ def test_admin_cannot_change_own_role(client, settings):
     """PHASE 1: Admin cannot demote/change their own role."""
     import sqlite3
     client.post("/auth/register", json={"username": "selfadmin1", "password": VALID_PASSWORD})
+    _approve_user("selfadmin1")
     with sqlite3.connect(settings.db_path) as con:
         admin_id = con.execute("SELECT user_id FROM users WHERE username='selfadmin1'").fetchone()[0]
-        con.execute("UPDATE users SET role='hr_admin' WHERE user_id=?", (admin_id,))
+        con.execute("UPDATE users SET role='hr_admin', status='active' WHERE user_id=?", (admin_id,))
     r = client.post("/auth/login", json={"username": "selfadmin1", "password": VALID_PASSWORD})
     admin_hdr = {"Authorization": f"Bearer {r.json()['access_token']}"}
     r = client.patch(f"/admin/users/{admin_id}/role", json={"role": "employee"}, headers=admin_hdr)
@@ -563,7 +579,7 @@ def test_failed_queries_returns_hash_not_raw(client, settings):
     client.post("/auth/register", json={"username": "hashadmin1", "password": VALID_PASSWORD})
     with sqlite3.connect(settings.db_path) as con:
         admin_id = con.execute("SELECT user_id FROM users WHERE username='hashadmin1'").fetchone()[0]
-        con.execute("UPDATE users SET role='hr_admin' WHERE user_id=?", (admin_id,))
+        con.execute("UPDATE users SET role='hr_admin', status='active' WHERE user_id=?", (admin_id,))
         # Insert a low-faithfulness query log
         import time as _t
         con.execute(
@@ -585,6 +601,7 @@ def test_failed_queries_returns_hash_not_raw(client, settings):
 def test_login_returns_refresh_token(client):
     """SECTION 11: Login response includes a refresh_token."""
     client.post("/auth/register", json={"username": "refuser1", "password": VALID_PASSWORD})
+    _approve_user("refuser1")
     r = client.post("/auth/login", json={"username": "refuser1", "password": VALID_PASSWORD})
     assert r.status_code == 200
     data = r.json()
@@ -595,6 +612,7 @@ def test_login_returns_refresh_token(client):
 def test_refresh_token_returns_new_access_token(client):
     """SECTION 11: POST /auth/refresh exchanges refresh token for new access token."""
     client.post("/auth/register", json={"username": "refuser2", "password": VALID_PASSWORD})
+    _approve_user("refuser2")
     r = client.post("/auth/login", json={"username": "refuser2", "password": VALID_PASSWORD})
     refresh = r.json()["refresh_token"]
     r2 = client.post("/auth/refresh", json={"refresh_token": refresh})
@@ -608,6 +626,7 @@ def test_refresh_token_returns_new_access_token(client):
 def test_refresh_token_rotation_invalidates_old(client):
     """SECTION 11: After refresh, the old refresh token is revoked."""
     client.post("/auth/register", json={"username": "refuser3", "password": VALID_PASSWORD})
+    _approve_user("refuser3")
     r = client.post("/auth/login", json={"username": "refuser3", "password": VALID_PASSWORD})
     old_refresh = r.json()["refresh_token"]
     client.post("/auth/refresh", json={"refresh_token": old_refresh})
@@ -625,6 +644,7 @@ def test_refresh_with_invalid_token(client):
 def test_logout_revokes_refresh_token(client):
     """SECTION 11: Logout revokes all refresh tokens for the user."""
     client.post("/auth/register", json={"username": "reflogout1", "password": VALID_PASSWORD})
+    _approve_user("reflogout1")
     r = client.post("/auth/login", json={"username": "reflogout1", "password": VALID_PASSWORD})
     data = r.json()
     hdr = {"Authorization": f"Bearer {data['access_token']}"}

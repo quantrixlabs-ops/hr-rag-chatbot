@@ -154,22 +154,138 @@ async def export_security_events(
 
 @router.get("/users")
 async def list_users(user: User = Depends(get_current_user)):
-    """List all users — admin only."""
+    """List all users with status info — admin only."""
     require_role(user, "hr_admin")
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
         rows = con.execute(
-            "SELECT user_id, username, role, department, full_name, email, created_at "
+            "SELECT user_id, username, role, department, full_name, email, created_at, "
+            "COALESCE(status,'active'), COALESCE(suspended,0) "
             "FROM users WHERE username NOT LIKE 'deleted_%' ORDER BY created_at DESC"
         ).fetchall()
     return {
         "users": [
             {"user_id": r[0], "username": r[1], "role": r[2], "department": r[3],
-             "full_name": r[4], "email": r[5], "created_at": r[6]}
+             "full_name": r[4], "email": r[5], "created_at": r[6],
+             "status": r[7], "suspended": bool(r[8])}
             for r in rows
         ],
         "count": len(rows),
     }
+
+
+@router.get("/users/pending")
+async def list_pending_users(user: User = Depends(get_current_user)):
+    """List users awaiting approval — admin only."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT user_id, username, full_name, email, department, created_at "
+            "FROM users WHERE status='pending_approval' ORDER BY created_at ASC"
+        ).fetchall()
+    return {
+        "pending": [
+            {"user_id": r[0], "username": r[1], "full_name": r[2],
+             "email": r[3], "department": r[4], "created_at": r[5]}
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+class ApprovalAction(BaseModel):
+    action: str  # "approve" or "reject"
+    role: str = "employee"
+
+
+@router.post("/users/{user_id}/approve")
+async def approve_or_reject_user(user_id: str, req: ApprovalAction, admin: User = Depends(get_current_user)):
+    """Approve or reject a pending user registration."""
+    require_role(admin, "hr_admin")
+    if req.action not in ("approve", "reject"):
+        raise HTTPException(400, "Action must be 'approve' or 'reject'")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT username, status FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        if row[1] != "pending_approval":
+            raise HTTPException(409, f"User is already {row[1]}")
+        if req.action == "approve":
+            valid_roles = {"employee", "manager", "hr_admin"}
+            role = req.role if req.role in valid_roles else "employee"
+            con.execute("UPDATE users SET status='active', role=? WHERE user_id=?", (role, user_id))
+        else:
+            con.execute("UPDATE users SET status='rejected' WHERE user_id=?", (user_id,))
+    log_security_event(
+        f"user_{req.action}d",
+        {"target_user": row[0], "target_id": user_id, "assigned_role": req.role if req.action == "approve" else ""},
+        user_id=admin.user_id,
+    )
+    return {"status": f"user_{req.action}d", "user_id": user_id, "username": row[0]}
+
+
+@router.post("/users/{user_id}/suspend")
+async def suspend_user(user_id: str, admin: User = Depends(get_current_user)):
+    """Suspend a user account — blocks login."""
+    require_role(admin, "hr_admin")
+    if user_id == admin.user_id:
+        raise HTTPException(403, "Cannot suspend yourself")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT username, suspended FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "User not found")
+        new_state = 0 if row[1] else 1
+        con.execute("UPDATE users SET suspended=? WHERE user_id=?", (new_state, user_id))
+    action = "suspended" if new_state else "unsuspended"
+    log_security_event(f"user_{action}", {"target_user": row[0], "target_id": user_id}, user_id=admin.user_id)
+    return {"status": action, "user_id": user_id, "username": row[0]}
+
+
+# ── Escalations (Phase 1) ────────────────────────────────────────────────────
+
+@router.get("/escalations")
+async def list_escalations(user: User = Depends(get_current_user)):
+    """List all HR escalation tickets — admin only."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT e.id, e.user_id, u.username, e.query, e.answer, e.reason, e.status, e.created_at "
+            "FROM escalations e LEFT JOIN users u ON e.user_id = u.user_id "
+            "ORDER BY e.created_at DESC LIMIT 100"
+        ).fetchall()
+    return {
+        "escalations": [
+            {"id": r[0], "user_id": r[1], "username": r[2] or "unknown",
+             "query": r[3], "answer": r[4], "reason": r[5],
+             "status": r[6], "created_at": r[7]}
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+class ResolveEscalation(BaseModel):
+    resolution: str
+
+
+@router.post("/escalations/{escalation_id}/resolve")
+async def resolve_escalation(escalation_id: int, req: ResolveEscalation, admin: User = Depends(get_current_user)):
+    """Resolve an escalation ticket."""
+    require_role(admin, "hr_admin")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT status FROM escalations WHERE id=?", (escalation_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Escalation not found")
+        con.execute(
+            "UPDATE escalations SET status='resolved', assigned_to=?, answer=? WHERE id=?",
+            (admin.user_id, req.resolution, escalation_id)
+        )
+    return {"status": "resolved", "escalation_id": escalation_id}
 
 
 # ── PHASE 1: Role assignment endpoint ────────────────────────────────────────

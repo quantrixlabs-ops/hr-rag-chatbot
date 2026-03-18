@@ -6,8 +6,10 @@ import json
 import sqlite3
 import time
 from collections import defaultdict
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from backend.app.core.config import get_settings
@@ -122,6 +124,77 @@ async def feedback(req: FeedbackRequest, user: User = Depends(get_current_user))
         con.execute("INSERT INTO feedback (session_id,query,answer,rating,timestamp,user_id) VALUES (?,?,?,?,?,?)",
                     (req.session_id, query_hash, req.answer, req.rating.value, time.time(), user.user_id))
     return {"status": "recorded", "rating": req.rating.value}
+
+
+# ── Escalation to HR ────────────────────────────────────────────────────────
+
+class EscalationRequest(BaseModel):
+    query: str
+    answer: str = ""
+    session_id: Optional[str] = None
+    reason: str = "User requested human assistance"
+
+
+@router.post("/escalate")
+async def escalate_to_hr(req: EscalationRequest, user: User = Depends(get_current_user)):
+    """Escalate a conversation to a human HR representative."""
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "INSERT INTO escalations (user_id, session_id, query, answer, reason, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (user.user_id, req.session_id, req.query, req.answer, req.reason, "open", time.time()),
+        )
+    from backend.app.core.security import log_security_event
+    log_security_event("escalation_created", {"query": req.query[:80], "reason": req.reason}, user_id=user.user_id)
+    return {"status": "escalated", "message": "Your question has been escalated to an HR representative. You will receive a response shortly."}
+
+
+# ── Saved Prompts ────────────────────────────────────────────────────────────
+
+class SavedPromptRequest(BaseModel):
+    title: str
+    prompt_text: str
+
+
+@router.get("/saved-prompts")
+async def list_saved_prompts(user: User = Depends(get_current_user)):
+    """List user's saved prompts."""
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT id, title, prompt_text, created_at FROM saved_prompts WHERE user_id=? ORDER BY created_at DESC",
+            (user.user_id,),
+        ).fetchall()
+    return {"prompts": [{"id": r[0], "title": r[1], "prompt_text": r[2], "created_at": r[3]} for r in rows]}
+
+
+@router.post("/saved-prompts")
+async def save_prompt(req: SavedPromptRequest, user: User = Depends(get_current_user)):
+    """Save a prompt for reuse."""
+    if not req.title.strip() or not req.prompt_text.strip():
+        raise HTTPException(400, "Title and prompt text are required")
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "INSERT INTO saved_prompts (user_id, title, prompt_text, created_at) VALUES (?,?,?,?)",
+            (user.user_id, req.title.strip()[:100], req.prompt_text.strip()[:1000], time.time()),
+        )
+    return {"status": "saved"}
+
+
+@router.delete("/saved-prompts/{prompt_id}")
+async def delete_saved_prompt(prompt_id: int, user: User = Depends(get_current_user)):
+    """Delete a saved prompt."""
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute("SELECT user_id FROM saved_prompts WHERE id=?", (prompt_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Prompt not found")
+        if row[0] != user.user_id:
+            raise HTTPException(403, "Not your prompt")
+        con.execute("DELETE FROM saved_prompts WHERE id=?", (prompt_id,))
+    return {"status": "deleted"}
 
 
 @router.post("/query/stream")

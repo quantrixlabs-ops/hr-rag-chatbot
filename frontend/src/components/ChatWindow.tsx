@@ -10,6 +10,7 @@ interface Props {
   streamingText?: string
   onSend: (message: string) => void
   onFeedback?: (query: string, answer: string, rating: string) => void
+  onEscalate?: (query: string, answer: string) => void
   token: string
 }
 
@@ -30,7 +31,7 @@ function TypingIndicator() {
   )
 }
 
-export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback, token }: Props) {
+export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback, onEscalate, token }: Props) {
   const endRef = useRef<HTMLDivElement>(null)
   const [viewingCitation, setViewingCitation] = useState<Citation | null>(null)
 
@@ -73,6 +74,12 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
                 ? (q) => onSend(q)
                 : undefined}
               onCitationClick={(citation) => setViewingCitation(citation)}
+              onEscalate={msg.role === 'assistant' && onEscalate
+                ? (query, answer) => {
+                    const userMsg = messages[i - 1]
+                    onEscalate(userMsg?.content || query, answer)
+                  }
+                : undefined}
             />
           ))}
           {loading && streamingText && (

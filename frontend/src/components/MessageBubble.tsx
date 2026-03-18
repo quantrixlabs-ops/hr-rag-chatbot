@@ -1,4 +1,4 @@
-import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink } from 'lucide-react'
+import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink, AlertCircle } from 'lucide-react'
 import type { ChatMessage, Citation } from '../types/chat'
 
 interface Props {
@@ -6,6 +6,7 @@ interface Props {
   onFeedback?: (rating: string) => void
   onSuggestedClick?: (question: string) => void
   onCitationClick?: (citation: Citation) => void
+  onEscalate?: (query: string, answer: string) => void
 }
 
 function ConfidenceBadge({ score }: { score: number }) {
@@ -68,7 +69,7 @@ function cleanExcerpt(text: string): string {
     .trim()
 }
 
-export default function MessageBubble({ message, onFeedback, onSuggestedClick, onCitationClick }: Props) {
+export default function MessageBubble({ message, onFeedback, onSuggestedClick, onCitationClick, onEscalate }: Props) {
   const isUser = message.role === 'user'
 
   const confidence = message.confidence ?? message.faithfulness_score ?? 0
@@ -141,16 +142,25 @@ export default function MessageBubble({ message, onFeedback, onSuggestedClick, o
                 {message.latency_ms !== undefined && message.latency_ms > 0 && (
                   <span className="text-gray-300">{(message.latency_ms / 1000).toFixed(1)}s</span>
                 )}
-                {onFeedback && (
-                  <div className="flex gap-0.5 ml-auto">
-                    <button onClick={() => onFeedback('positive')} className="p-1.5 hover:bg-emerald-50 rounded-lg transition-colors" title="Helpful">
-                      <ThumbsUp size={13} className="text-gray-300 hover:text-emerald-500" />
+                <div className="flex gap-0.5 ml-auto">
+                  {onFeedback && (
+                    <>
+                      <button onClick={() => onFeedback('positive')} className="p-1.5 hover:bg-emerald-50 rounded-lg transition-colors" title="Helpful">
+                        <ThumbsUp size={13} className="text-gray-300 hover:text-emerald-500" />
+                      </button>
+                      <button onClick={() => onFeedback('negative')} className="p-1.5 hover:bg-red-50 rounded-lg transition-colors" title="Not helpful">
+                        <ThumbsDown size={13} className="text-gray-300 hover:text-red-500" />
+                      </button>
+                    </>
+                  )}
+                  {onEscalate && (
+                    <button onClick={() => onEscalate(message.content, message.content)}
+                      className="ml-1 px-2 py-1 text-[11px] text-orange-600 bg-orange-50 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors flex items-center gap-1"
+                      title="Escalate to HR representative">
+                      <AlertCircle size={11} /> Escalate to HR
                     </button>
-                    <button onClick={() => onFeedback('negative')} className="p-1.5 hover:bg-red-50 rounded-lg transition-colors" title="Not helpful">
-                      <ThumbsDown size={13} className="text-gray-300 hover:text-red-500" />
-                    </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             )}
 
