@@ -277,12 +277,13 @@ def create_app() -> FastAPI:
         app.add_middleware(AdminIPAllowlistMiddleware)
 
     # Routers
-    from backend.app.api import auth_routes, chat_routes, document_routes, admin_routes, user_routes
+    from backend.app.api import auth_routes, chat_routes, document_routes, admin_routes, user_routes, integration_routes
     app.include_router(auth_routes.router)
     app.include_router(chat_routes.router)
     app.include_router(document_routes.router)
     app.include_router(admin_routes.router)
     app.include_router(user_routes.router)
+    app.include_router(integration_routes.router)
 
     # Prometheus metrics — secured behind admin auth
     from backend.app.core.security import get_current_user, require_role
