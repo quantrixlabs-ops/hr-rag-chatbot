@@ -288,6 +288,50 @@ async def resolve_escalation(escalation_id: int, req: ResolveEscalation, admin: 
     return {"status": "resolved", "escalation_id": escalation_id}
 
 
+# ── Phase 2: Background tasks + Cache stats ──────────────────────────────────
+
+@router.get("/tasks")
+async def list_background_tasks(user: User = Depends(get_current_user)):
+    """List recent background tasks — admin only."""
+    require_role(user, "hr_admin")
+    from backend.app.core.background_tasks import list_tasks
+    return {"tasks": list_tasks(limit=30)}
+
+
+@router.get("/tasks/{task_id}")
+async def get_task_status(task_id: str, user: User = Depends(get_current_user)):
+    """Get status of a specific background task."""
+    require_role(user, "hr_admin")
+    from backend.app.core.background_tasks import get_task
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return {
+        "task_id": task.task_id, "task_type": task.task_type,
+        "status": task.status, "progress": task.progress,
+        "created_at": task.created_at, "completed_at": task.completed_at,
+        "result": task.result, "error": task.error,
+    }
+
+
+@router.get("/cache/stats")
+async def cache_statistics(user: User = Depends(get_current_user)):
+    """View semantic cache statistics — admin only."""
+    require_role(user, "hr_admin")
+    from backend.app.core.semantic_cache import get_cache_stats
+    return get_cache_stats()
+
+
+@router.post("/cache/clear")
+async def clear_semantic_cache(user: User = Depends(get_current_user)):
+    """Clear the semantic query cache — use after document reindex."""
+    require_role(user, "hr_admin")
+    from backend.app.core.semantic_cache import clear_cache
+    clear_cache()
+    log_security_event("cache_cleared", {}, user_id=user.user_id)
+    return {"status": "cache_cleared"}
+
+
 # ── PHASE 1: Role assignment endpoint ────────────────────────────────────────
 _VALID_ROLES = {"employee", "manager", "hr_admin"}
 

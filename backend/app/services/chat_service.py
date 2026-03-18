@@ -1,12 +1,14 @@
-"""Chat service — orchestrates session, RAG, and response formatting — Section 2.2."""
+"""Chat service — orchestrates session, RAG, caching, and response formatting — Section 2.2."""
 
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 import structlog
 
 from backend.app.core.security import check_prompt_injection, get_allowed_roles, log_access, sanitize_query
+from backend.app.core.semantic_cache import get_cached, put_cache
 from backend.app.models.chat_models import User
 from backend.app.models.session_models import ChatResult
 from backend.app.database.session_store import SessionStore
@@ -57,7 +59,31 @@ class ChatService:
 
         recent = self.sessions.get_recent_turns(session.session_id, limit=5)
 
-        # RAG pipeline with error boundary
+        # ── Semantic cache check (skip for follow-up queries with session context) ──
+        if not recent:
+            cached = get_cached(query)
+            if cached:
+                ms = (time.time() - t0) * 1000
+                result = ChatResult(
+                    answer=cached["answer"],
+                    session_id=session.session_id,
+                    citations=[],  # Citations are serialized differently in cache
+                    confidence=cached["confidence"],
+                    faithfulness_score=cached["confidence"],
+                    query_type="cached",
+                    latency_ms=ms,
+                    suggested_questions=cached.get("suggested_questions", []),
+                )
+                # Persist turns even for cached responses
+                try:
+                    self.sessions.add_turn(session.session_id, "user", query)
+                    self.sessions.add_turn(session.session_id, "assistant", result.answer)
+                except Exception:
+                    pass
+                logger.info("cache_served", query=query[:50], latency_ms=round(ms))
+                return result
+
+        # ── RAG pipeline with error boundary ──
         try:
             result = self.rag.query(query=query, user_role=user.role, session_turns=recent, department=user.department)
         except Exception as e:
@@ -68,6 +94,13 @@ class ChatService:
                 session_id=session.session_id, citations=[], confidence=0.0,
                 faithfulness_score=0.0, query_type="error", latency_ms=ms,
             )
+
+        # ── Cache the result (only for grounded responses) ──
+        if result.confidence >= 0.4 and result.query_type not in ("clarification", "redirect", "greeting"):
+            citation_dicts = [{"source": c.source, "page": c.page, "excerpt": c.text_excerpt}
+                              for c in result.citations] if result.citations else []
+            put_cache(query, None, result.answer, citation_dicts,
+                      result.confidence, result.suggested_questions)
 
         # Persist turns
         try:
