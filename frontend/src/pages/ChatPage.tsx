@@ -47,6 +47,7 @@ export default function ChatPage({ token, sessionId, onSessionChange }: Props) {
       streamingText={chat.streamingText}
       onSend={chat.send}
       onFeedback={handleFeedback}
+      token={token}
     />
   )
 }

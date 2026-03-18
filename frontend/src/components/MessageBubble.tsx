@@ -1,10 +1,11 @@
-import { ThumbsUp, ThumbsDown, FileText, Shield } from 'lucide-react'
-import type { ChatMessage } from '../types/chat'
+import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink } from 'lucide-react'
+import type { ChatMessage, Citation } from '../types/chat'
 
 interface Props {
   message: ChatMessage
   onFeedback?: (rating: string) => void
   onSuggestedClick?: (question: string) => void
+  onCitationClick?: (citation: Citation) => void
 }
 
 function ConfidenceBadge({ score }: { score: number }) {
@@ -22,7 +23,7 @@ function ConfidenceBadge({ score }: { score: number }) {
   )
 }
 
-export default function MessageBubble({ message, onFeedback, onSuggestedClick }: Props) {
+export default function MessageBubble({ message, onFeedback, onSuggestedClick, onCitationClick }: Props) {
   const isUser = message.role === 'user'
 
   // Resolve confidence: prefer explicit field, never show 0% when we have citations
@@ -44,15 +45,27 @@ export default function MessageBubble({ message, onFeedback, onSuggestedClick }:
               <p className="text-sm whitespace-pre-wrap leading-relaxed">{message.content}</p>
             </div>
 
-            {/* Citations */}
+            {/* Clickable Citations */}
             {!isUser && message.citations && message.citations.length > 0 && (
               <div className="mt-2 space-y-1">
                 {message.citations.map((c, i) => (
-                  <div key={i} className="flex items-center gap-1.5 text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-1.5">
-                    <FileText size={12} className="text-blue-500 flex-shrink-0" />
-                    <span className="font-medium">{c.source}</span>
-                    {c.page && <span className="text-gray-400">p.{c.page}</span>}
-                  </div>
+                  <button
+                    key={i}
+                    onClick={() => onCitationClick?.(c)}
+                    className="w-full flex items-center gap-2 text-xs text-left bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg px-3 py-2 transition-colors group"
+                  >
+                    <FileText size={14} className="text-blue-500 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <span className="font-semibold text-blue-700">{c.source}</span>
+                      {c.page && <span className="text-blue-400 ml-1.5">Page {c.page}</span>}
+                      {c.excerpt && (
+                        <p className="text-gray-500 truncate mt-0.5 text-[11px] leading-tight">
+                          "{c.excerpt.substring(0, 80)}..."
+                        </p>
+                      )}
+                    </div>
+                    <ExternalLink size={12} className="text-blue-400 opacity-0 group-hover:opacity-100 flex-shrink-0 transition-opacity" />
+                  </button>
                 ))}
               </div>
             )}

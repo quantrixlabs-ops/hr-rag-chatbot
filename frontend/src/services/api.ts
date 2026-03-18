@@ -112,6 +112,12 @@ export async function uploadDocument(token: string, file: File, title: string, c
   return res.json()
 }
 
+export async function getDocumentContent(token: string, documentId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/documents/${documentId}/content`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch document content')
+  return res.json()
+}
+
 export async function getDocuments(token: string) {
   const res = await handleResponse(await fetch(`${BASE}/documents`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch documents')

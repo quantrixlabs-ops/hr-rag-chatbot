@@ -197,6 +197,95 @@ async def upload(
     return resp
 
 
+@router.get("/{document_id}/content")
+async def get_document_content(document_id: str, user: User = Depends(get_current_user)):
+    """Return the full text content of a document with chunk boundaries.
+
+    Used by the frontend document viewer to show source text with
+    highlighted sections that were used to answer a query.
+    """
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT title, category, source_filename, access_roles, version, page_count, chunk_count "
+            "FROM documents WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Document not found")
+
+    roles = json.loads(row[3])
+    if not can_access_document(user.role, roles):
+        raise HTTPException(403, "Access denied to this document")
+
+    # Read the source file
+    filepath = os.path.join(s.upload_dir, row[2])
+    if not os.path.exists(filepath):
+        raise HTTPException(404, "Source file not found on disk")
+
+    ext = os.path.splitext(row[2])[1].lower()
+    pages = []
+
+    if ext == ".pdf":
+        try:
+            import pdfplumber
+            with pdfplumber.open(filepath) as pdf:
+                for i, page in enumerate(pdf.pages, 1):
+                    text = page.extract_text() or ""
+                    pages.append({"page": i, "text": text})
+        except Exception:
+            with open(filepath, "r", errors="ignore") as f:
+                pages = [{"page": 1, "text": f.read()}]
+    elif ext == ".docx":
+        try:
+            import docx
+            doc = docx.Document(filepath)
+            full_text = "\n".join(p.text for p in doc.paragraphs)
+            pages = [{"page": 1, "text": full_text}]
+        except Exception:
+            pages = [{"page": 1, "text": "(Could not read .docx file)"}]
+    else:
+        with open(filepath, "r", errors="ignore") as f:
+            content = f.read()
+        # Split into sections by headings for better navigation
+        lines = content.split("\n")
+        current_page = 1
+        current_text = []
+        for line in lines:
+            if line.startswith("# ") and current_text:
+                pages.append({"page": current_page, "text": "\n".join(current_text)})
+                current_page += 1
+                current_text = [line]
+            else:
+                current_text.append(line)
+        if current_text:
+            pages.append({"page": current_page, "text": "\n".join(current_text)})
+
+    # Get the indexed chunks for this document (for highlighting)
+    reg = get_registry()
+    vs = reg["vector_store"]
+    chunk_highlights = []
+    for meta in vs.metadata:
+        if meta.document_id == document_id:
+            chunk_highlights.append({
+                "chunk_index": meta.chunk_index,
+                "page": meta.page,
+                "text_preview": meta.text[:150],
+                "section": meta.section_heading or "",
+            })
+
+    return {
+        "document_id": document_id,
+        "title": row[0],
+        "category": row[1],
+        "version": row[4],
+        "page_count": len(pages),
+        "chunk_count": row[6],
+        "pages": pages,
+        "chunks": sorted(chunk_highlights, key=lambda c: c["chunk_index"]),
+    }
+
+
 @router.get("")
 async def list_docs(user: User = Depends(get_current_user)):
     s = get_settings()

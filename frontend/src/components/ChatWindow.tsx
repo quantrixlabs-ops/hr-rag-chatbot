@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import MessageBubble from './MessageBubble'
 import ChatInput from './ChatInput'
-import type { ChatMessage } from '../types/chat'
+import DocumentViewer from './DocumentViewer'
+import type { ChatMessage, Citation } from '../types/chat'
 
 interface Props {
   messages: ChatMessage[]
@@ -9,6 +10,7 @@ interface Props {
   streamingText?: string
   onSend: (message: string) => void
   onFeedback?: (query: string, answer: string, rating: string) => void
+  token: string
 }
 
 function TypingIndicator() {
@@ -28,8 +30,9 @@ function TypingIndicator() {
   )
 }
 
-export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback }: Props) {
+export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback, token }: Props) {
   const endRef = useRef<HTMLDivElement>(null)
+  const [viewingCitation, setViewingCitation] = useState<Citation | null>(null)
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -69,6 +72,7 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
               onSuggestedClick={msg.role === 'assistant' && i === messages.length - 1 && !loading
                 ? (q) => onSend(q)
                 : undefined}
+              onCitationClick={(citation) => setViewingCitation(citation)}
             />
           ))}
           {loading && streamingText && (
@@ -87,6 +91,15 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
       </div>
 
       <ChatInput onSend={onSend} disabled={loading} />
+
+      {/* Document Viewer Modal */}
+      {viewingCitation && (
+        <DocumentViewer
+          token={token}
+          citation={viewingCitation}
+          onClose={() => setViewingCitation(null)}
+        />
+      )}
     </div>
   )
 }
