@@ -46,4 +46,9 @@ export interface AdminMetrics {
   active_sessions: number
   total_documents: number
   total_chunks: number
+  query_success_rate: number
+  failed_queries: number
+  negative_feedback_count: number
+  top_documents?: { source: string; query_count: number }[]
+  query_type_distribution?: Record<string, number>
 }

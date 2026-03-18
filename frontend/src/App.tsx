@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import LoginPage from './pages/LoginPage'
 import ChatPage from './pages/ChatPage'
 import AdminDashboard from './pages/AdminDashboard'
+import UploadDocs from './pages/UploadDocs'
 import Sidebar from './components/Sidebar'
 import { getSessions, setAuthExpiredHandler, logout as apiLogout, refreshAccessToken } from './services/api'
 import type { AuthState, SessionSummary } from './types/chat'
@@ -149,8 +150,11 @@ export default function App() {
         {page === 'chat' && (
           <ChatPage token={auth.token} sessionId={activeSession} onSessionChange={setActiveSession} />
         )}
-        {(page === 'admin' || page === 'upload') && (
+        {page === 'admin' && (
           <AdminDashboard token={auth.token} />
+        )}
+        {page === 'upload' && (
+          <UploadDocs token={auth.token} />
         )}
       </main>
     </div>

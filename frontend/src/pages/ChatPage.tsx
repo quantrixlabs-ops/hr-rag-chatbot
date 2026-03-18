@@ -13,9 +13,13 @@ interface Props {
 export default function ChatPage({ token, sessionId, onSessionChange }: Props) {
   const chat = useChat(token)
 
-  // Sync external session selection
+  // Sync external session selection — including New Chat (null)
   useEffect(() => {
-    if (sessionId && sessionId !== chat.sessionId) {
+    if (sessionId === null && chat.sessionId !== null) {
+      // New Chat clicked — clear everything
+      chat.clearChat()
+    } else if (sessionId && sessionId !== chat.sessionId) {
+      // Load an existing session
       getSessionHistory(token, sessionId).then(data => {
         const msgs: ChatMessage[] = data.turns.map((t: any) => ({
           id: crypto.randomUUID(),
