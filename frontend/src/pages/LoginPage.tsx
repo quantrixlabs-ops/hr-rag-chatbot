@@ -10,6 +10,7 @@ interface Props {
 export default function LoginPage({ onLogin }: Props) {
   const [isRegister, setIsRegister] = useState(false)
   const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
   const [loading, setLoading] = useState(false)
 
   // Login fields
@@ -30,6 +31,7 @@ export default function LoginPage({ onLogin }: Props) {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    setSuccess('')
     setLoading(true)
     try {
       const data = await login(loginUser, loginPass)
@@ -58,9 +60,16 @@ export default function LoginPage({ onLogin }: Props) {
         phone: regPhone,
         role: regRole,
       })
-      // Auto-login after registration
-      const data = await login(regUser, regPass)
-      onLogin({ token: data.access_token, refreshToken: data.refresh_token || null, user: data.user })
+      // Registration successful — redirect to login form
+      setSuccess('Account created successfully! Please sign in.')
+      setIsRegister(false)
+      // Pre-fill the login username for convenience
+      setLoginUser(regUser)
+      setLoginPass('')
+      // Clear register fields
+      setRegName(''); setRegEmail(''); setRegPhone('')
+      setRegUser(''); setRegPass(''); setRegConfirm('')
+      setRegRole('employee')
     } catch (err: any) {
       setError(err.message || 'Registration failed')
     } finally {
@@ -71,6 +80,7 @@ export default function LoginPage({ onLogin }: Props) {
   const switchMode = () => {
     setIsRegister(!isRegister)
     setError('')
+    setSuccess('')
   }
 
   return (
@@ -108,6 +118,7 @@ export default function LoginPage({ onLogin }: Props) {
               </div>
             </div>
 
+            {success && <p className="text-emerald-700 text-sm bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">{success}</p>}
             {error && <p className="text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">{error}</p>}
 
             <button type="submit" disabled={loading}
