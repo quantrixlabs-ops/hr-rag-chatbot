@@ -1,12 +1,44 @@
 import { useState, useRef, useEffect } from 'react'
 import { Send } from 'lucide-react'
 
+// Quick-start chips shown below the input, role-aware
+const CHIPS_BY_ROLE: Record<string, string[]> = {
+  employee: [
+    'How many vacation days do I have left?',
+    'What is the parental leave policy?',
+    'How do I submit a reimbursement?',
+    'What are the working hours?',
+  ],
+  hr_admin: [
+    'Show me pending onboarding tasks',
+    'What is the current headcount?',
+    'Summarise this month\'s policy updates',
+    'Which documents need renewal?',
+  ],
+  manager: [
+    'What is the team\'s leave balance?',
+    'How do I approve a promotion?',
+    'What is the performance review schedule?',
+    'Show me the org chart',
+  ],
+  super_admin: [
+    'List all tenants',
+    'Show system health metrics',
+    'Summarise recent audit events',
+    'What models are active?',
+  ],
+}
+
+const DEFAULT_CHIPS = CHIPS_BY_ROLE.employee
+
 interface Props {
   onSend: (message: string) => void
   disabled?: boolean
+  role?: string
+  suggestedQuestions?: string[]  // dynamic suggestions from last AI response
 }
 
-export default function ChatInput({ onSend, disabled }: Props) {
+export default function ChatInput({ onSend, disabled, role, suggestedQuestions }: Props) {
   const [input, setInput] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -35,26 +67,58 @@ export default function ChatInput({ onSend, disabled }: Props) {
     }
   }
 
+  const sendChip = (text: string) => {
+    if (disabled) return
+    onSend(text)
+  }
+
+  // Show AI-suggested questions if available, else show role-aware defaults when input is empty
+  const chips = suggestedQuestions && suggestedQuestions.length > 0
+    ? suggestedQuestions.slice(0, 3)
+    : !input.trim()
+      ? (CHIPS_BY_ROLE[role || ''] || DEFAULT_CHIPS).slice(0, 4)
+      : []
+
   return (
-    <div className="border-t border-gray-200 bg-white p-4">
-      <div className="max-w-3xl mx-auto flex items-end gap-3">
-        <textarea
-          ref={ref}
-          value={input}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask an HR question..."
-          rows={1}
-          disabled={disabled}
-          className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
-        />
-        <button
-          onClick={handleSubmit}
-          disabled={!input.trim() || disabled}
-          className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
-        >
-          <Send size={18} />
-        </button>
+    <div className="border-t border-gray-200 bg-white">
+      {/* Quick chips */}
+      {chips.length > 0 && (
+        <div className="px-4 pt-3 flex flex-wrap gap-2">
+          {chips.map((chip, i) => (
+            <button
+              key={i}
+              onClick={() => sendChip(chip)}
+              disabled={disabled}
+              className="text-xs px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-full hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap max-w-[260px] truncate"
+              title={chip}
+            >
+              {chip}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Input row */}
+      <div className="p-4">
+        <div className="max-w-3xl mx-auto flex items-end gap-3">
+          <textarea
+            ref={ref}
+            value={input}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask an HR question..."
+            rows={1}
+            disabled={disabled}
+            className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:opacity-50 disabled:bg-gray-50"
+          />
+          <button
+            onClick={handleSubmit}
+            disabled={!input.trim() || disabled}
+            className="p-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+          >
+            <Send size={18} />
+          </button>
+        </div>
       </div>
     </div>
   )

@@ -1,6 +1,123 @@
 version: "3.9"
 
+# Phase 4 additions:
+#   pgbouncer  — connection pooler (5000 clients → 20-50 DB connections)
+#   beat       — Celery Beat scheduler (HRMS sync every 4h, cache warming daily)
+#
+# Optional multi-Ollama nodes (uncomment to enable):
+#   Set OLLAMA_NODES=http://ollama:11434,http://ollama2:11434,http://ollama3:11434
+#   Uncomment ollama2 and ollama3 services below for horizontal LLM scaling
+
 services:
+  # ── PostgreSQL — Primary database ──────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hr_chatbot
+      POSTGRES_USER: hr_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hr_dev_password_change_in_prod}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hr_user -d hr_chatbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Qdrant — Vector store ───────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── MinIO — S3-compatible object storage for documents ─────────────────────
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"   # MinIO Console UI
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin123}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis — Task broker + result backend + semantic cache ──────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ollama — Local LLM ──────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+
+  # ── PgBouncer — PostgreSQL connection pooler (Phase 4, F-46) ──────────────
+  # 5000 client connections → 20-50 actual PostgreSQL connections
+  # API and workers connect to :5433 (PgBouncer), not :5432 (PostgreSQL)
+  pgbouncer:
+    image: edoburu/pgbouncer:1.22.0
+    ports:
+      - "5433:5432"   # PgBouncer listens on 5433 externally, 5432 internally
+    environment:
+      DATABASE_URL: "postgresql://hr_user:${POSTGRES_PASSWORD:-hr_dev_password_change_in_prod}@postgres:5432/hr_chatbot"
+      POOL_MODE: transaction         # Transaction mode: best for short-lived queries
+      MAX_CLIENT_CONN: 5000          # Max client connections
+      DEFAULT_POOL_SIZE: 25          # Server connections per pool
+      MIN_POOL_SIZE: 5
+      RESERVE_POOL_SIZE: 5
+      RESERVE_POOL_TIMEOUT: 5
+      LOG_CONNECTIONS: "0"
+      LOG_DISCONNECTIONS: "0"
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 -U hr_user || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend API ─────────────────────────────────────────────────────────────
   api:
     build: ./backend
     working_dir: /app
@@ -9,25 +126,134 @@ services:
       - "8000:8000"
     environment:
       - ENVIRONMENT=development
+
+      # Database — PostgreSQL (primary)
+      - DATABASE_URL=postgresql://hr_user:${POSTGRES_PASSWORD:-hr_dev_password_change_in_prod}@postgres:5432/hr_chatbot
+      - DB_PATH=/app/data/hr_chatbot.db  # SQLite fallback path (kept for local dev without Docker)
+
+      # Vector Store — Qdrant (primary)
+      - VECTOR_STORE_BACKEND=qdrant
+      - QDRANT_URL=http://qdrant:6333
+      - FAISS_INDEX_DIR=/app/data/faiss_index  # FAISS fallback path
+
+      # LLM
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - LLM_MODEL=${LLM_MODEL:-llama3:8b}
+      - OLLAMA_BASE_URL=http://ollama:11434
+
+      # Embeddings
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
+      - EMBEDDING_PROVIDER=ollama
+      - EMBEDDING_DIMENSION=768
+
+      # Auth
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-change-in-production-use-256bit}
+      - REDIS_URL=redis://redis:6379/0
+
+      # Object Storage — MinIO (primary) or local (fallback)
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - MINIO_BUCKET=hr-documents
+
+      # App
+      - UPLOAD_DIR=/app/data/uploads
+      - COMPANY_NAME=${COMPANY_NAME:-Acme Corp}
+      - HR_CONTACT_EMAIL=${HR_CONTACT_EMAIL:-hr@acmecorp.com}
+
+      # Phase 4: Multi-model routing
+      # Set MODEL_FAST/MODEL_STANDARD/MODEL_ADVANCED to different pulled models
+      # If unset, all tiers fall back to LLM_MODEL (single-model mode)
+      - MODEL_FAST=${MODEL_FAST:-}
+      - MODEL_STANDARD=${MODEL_STANDARD:-}
+      - MODEL_ADVANCED=${MODEL_ADVANCED:-}
+
+      # Phase 4: Multi-Ollama load balancing
+      # Comma-separated list of Ollama node URLs. Single node = no balancing.
+      - OLLAMA_NODES=${OLLAMA_NODES:-}
+
+      # Phase 4: Read replica (optional)
+      - READ_REPLICA_URL=${READ_REPLICA_URL:-}
+    volumes:
+      - backend_data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  # ── Celery Worker — Async document ingestion + background jobs ─────────────
+  # Handles: ingestion, hrms_sync, cache_warm, webhooks queues
+  worker:
+    build: ./backend
+    working_dir: /app
+    command: celery -A backend.app.workers.celery_app worker --loglevel=info --concurrency=4 -Q ingestion,hrms_sync,cache_warm,webhooks,default
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://hr_user:${POSTGRES_PASSWORD:-hr_dev_password_change_in_prod}@pgbouncer:5432/hr_chatbot
+      - DB_PATH=/app/data/hr_chatbot.db
+      - VECTOR_STORE_BACKEND=qdrant
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=hr_chunks
+      - REDIS_URL=redis://redis:6379/0
       - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
       - LLM_MODEL=${LLM_MODEL:-llama3:8b}
       - OLLAMA_BASE_URL=http://ollama:11434
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text}
       - EMBEDDING_PROVIDER=ollama
       - EMBEDDING_DIMENSION=768
-      - VECTOR_STORE_BACKEND=faiss
-      - FAISS_INDEX_DIR=/app/data/faiss_index
-      - DB_PATH=/app/data/hr_chatbot.db
       - UPLOAD_DIR=/app/data/uploads
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-change-in-production}
-      - COMPANY_NAME=${COMPANY_NAME:-Acme Corp}
-      - HR_CONTACT_EMAIL=${HR_CONTACT_EMAIL:-hr@acmecorp.com}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-change-in-production-use-256bit}
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - MINIO_BUCKET=hr-documents
     volumes:
       - backend_data:/app/data
       - ./backend:/app/backend
     depends_on:
-      - ollama
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      ollama:
+        condition: service_started
 
+  # ── Celery Beat — Periodic task scheduler (Phase 4, F-43) ─────────────────
+  # Schedules: HRMS sync every 4h, cache warming daily 6am, session cleanup 2am
+  beat:
+    build: ./backend
+    working_dir: /app
+    command: celery -A backend.app.workers.celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler --schedule /app/data/celerybeat-schedule
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://hr_user:${POSTGRES_PASSWORD:-hr_dev_password_change_in_prod}@pgbouncer:5432/hr_chatbot
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - LLM_MODEL=${LLM_MODEL:-llama3:8b}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-change-in-production-use-256bit}
+    volumes:
+      - backend_data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+
+  # ── Frontend ────────────────────────────────────────────────────────────────
   frontend:
     build: ./frontend
     ports:
@@ -35,18 +261,61 @@ services:
     depends_on:
       - api
 
-  ollama:
-    image: ollama/ollama:latest
+  # ── Prometheus — Metrics collection (Phase 5, F-56) ─────────────────────────
+  # Access: http://localhost:9090
+  prometheus:
+    image: prom/prometheus:v2.51.0
     ports:
-      - "11434:11434"
+      - "9090:9090"
     volumes:
-      - ollama_models:/root/.ollama
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 16G
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alertmanager/rules.yml:/etc/prometheus/rules/rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    depends_on:
+      - api
+    profiles: ["monitoring"]
+
+  # ── Grafana — Dashboards (Phase 5, F-56) ─────────────────────────────────────
+  # Access: http://localhost:3001 (admin/admin)
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_DOMAIN: localhost
+    depends_on:
+      - prometheus
+    profiles: ["monitoring"]
+
+  # ── Jaeger — Distributed tracing (Phase 5, F-57) ─────────────────────────────
+  # Access: http://localhost:16686
+  # OTLP gRPC: localhost:4317
+  jaeger:
+    image: jaegertracing/all-in-one:1.56
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC (OpenTelemetry)
+      - "4318:4318"     # OTLP HTTP
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    profiles: ["monitoring"]
 
 volumes:
-  backend_data:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  minio_data:
   ollama_models:
+  backend_data:
+  prometheus_data:
+  grafana_data:

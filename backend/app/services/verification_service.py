@@ -20,6 +20,8 @@ class AnswerVerifier:
         answer: str,
         chunks: list[SearchResult],
         query: str,
+        intent: str = "policy_lookup",
+        analysis_confidence: float = 0.8,
     ) -> VerificationResult:
         claims = self._extract_claims(answer)
         verified: list[ClaimVerification] = []
@@ -60,6 +62,16 @@ class AnswerVerifier:
         # Ensure we never report 0 confidence when we have relevant chunks with evidence
         if chunks and chunks[0].score > 0.4 and faithfulness > 0.3:
             confidence_score = max(confidence_score, 0.5)
+
+        # Phase 1: Intent-aware confidence adjustment
+        # Sensitive and calculation queries get a slight confidence penalty
+        # because they often require personal data we don't have
+        if intent == "sensitive":
+            confidence_score = min(confidence_score, 0.85)  # cap — sensitive answers need HR verification
+        elif intent == "calculation":
+            confidence_score *= 0.95  # slight penalty — calculations may need personal data
+        # Factor in analyzer confidence as a soft signal
+        confidence_score = confidence_score * (0.7 + 0.3 * analysis_confidence)
 
         hallucination_risk = round(1.0 - confidence_score, 3)
 

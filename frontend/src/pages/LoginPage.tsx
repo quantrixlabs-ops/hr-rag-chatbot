@@ -1,14 +1,19 @@
-import { useState } from 'react'
-import { login, register } from '../services/api'
+import { useState, useEffect } from 'react'
+import { login, register, verifyMfaLogin, getSetupStatus } from '../services/api'
 import type { AuthState } from '../types/chat'
-import { Eye, EyeOff } from 'lucide-react'
+import { Eye, EyeOff, ShieldCheck } from 'lucide-react'
 
 interface Props {
   onLogin: (auth: AuthState) => void
 }
 
+type LoginStep = 'credentials' | 'mfa'
+
 export default function LoginPage({ onLogin }: Props) {
   const [isRegister, setIsRegister] = useState(false)
+  const [loginStep, setLoginStep] = useState<LoginStep>('credentials')
+  const [mfaToken, setMfaToken] = useState('')   // server-issued short-lived token
+  const [mfaCode, setMfaCode] = useState('')
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [loading, setLoading] = useState(false)
@@ -25,7 +30,16 @@ export default function LoginPage({ onLogin }: Props) {
   const [regUser, setRegUser] = useState('')
   const [regPass, setRegPass] = useState('')
   const [regConfirm, setRegConfirm] = useState('')
+  const [regRole, setRegRole] = useState('employee')
   const [showRegPass, setShowRegPass] = useState(false)
+
+  // Bootstrap: check if admin/hr_head roles need to be created
+  const [setupStatus, setSetupStatus] = useState<{ has_users: boolean; has_admin: boolean; has_hr_head: boolean }>({ has_users: true, has_admin: true, has_hr_head: true })
+  useEffect(() => {
+    getSetupStatus().then(setSetupStatus).catch(() => {})
+  }, [])
+  // Re-fetch after successful registration (hides bootstrap options once roles are filled)
+  const refreshSetupStatus = () => getSetupStatus().then(setSetupStatus).catch(() => {})
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -34,9 +48,34 @@ export default function LoginPage({ onLogin }: Props) {
     setLoading(true)
     try {
       const data = await login(loginUser, loginPass)
-      onLogin({ token: data.access_token, refreshToken: data.refresh_token || null, user: data.user })
+      if (data.mfa_required && data.mfa_token) {
+        // Server requires TOTP step-up
+        setMfaToken(data.mfa_token)
+        setLoginStep('mfa')
+      } else {
+        onLogin({ token: data.access_token, refreshToken: data.refresh_token || null, user: data.user })
+      }
     } catch (err: any) {
       setError(err.message || 'Invalid credentials')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleMfaVerify = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (mfaCode.replace(/\s/g, '').length < 6) {
+      setError('Enter the 6-digit code from your authenticator app.')
+      return
+    }
+    setError('')
+    setLoading(true)
+    try {
+      const data = await verifyMfaLogin(mfaToken, mfaCode.replace(/\s/g, ''))
+      onLogin({ token: data.access_token, refreshToken: data.refresh_token || null, user: data.user })
+    } catch (err: any) {
+      setError(err.message || 'Invalid MFA code. Try again.')
+      setMfaCode('')
     } finally {
       setLoading(false)
     }
@@ -51,20 +90,21 @@ export default function LoginPage({ onLogin }: Props) {
     }
     setLoading(true)
     try {
-      await register({
+      const result = await register({
         username: regUser,
         password: regPass,
         full_name: regName,
         email: regEmail,
         phone: regPhone,
+        role: regRole,
       })
-      // Registration successful — redirect to login form
-      setSuccess('Account created! Your registration is pending admin approval.')
+      setSuccess(result.message || 'Account created! Your registration is pending admin approval.')
+      refreshSetupStatus()
       setIsRegister(false)
       setLoginUser(regUser)
       setLoginPass('')
       setRegName(''); setRegEmail(''); setRegPhone('')
-      setRegUser(''); setRegPass(''); setRegConfirm('')
+      setRegUser(''); setRegPass(''); setRegConfirm(''); setRegRole('employee')
     } catch (err: any) {
       setError(err.message || 'Registration failed')
     } finally {
@@ -78,6 +118,67 @@ export default function LoginPage({ onLogin }: Props) {
     setSuccess('')
   }
 
+  const backToCredentials = () => {
+    setLoginStep('credentials')
+    setMfaToken('')
+    setMfaCode('')
+    setError('')
+  }
+
+  // ── MFA step ───────────────────────────────────────────────────────────────
+  if (loginStep === 'mfa') {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-emerald-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
+          <div className="text-center mb-6">
+            <div className="w-14 h-14 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
+              <ShieldCheck size={28} className="text-blue-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-gray-900">Two-Factor Auth</h1>
+            <p className="text-gray-500 text-sm mt-1">
+              Open your authenticator app and enter the 6-digit code.
+            </p>
+          </div>
+
+          <form onSubmit={handleMfaVerify} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Authenticator Code</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9 ]*"
+                maxLength={7}
+                value={mfaCode}
+                onChange={e => setMfaCode(e.target.value)}
+                autoFocus
+                placeholder="000 000"
+                className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-2xl font-mono tracking-[0.4em] letter-spacing-wide"
+              />
+            </div>
+
+            {error && <p className="text-red-500 text-sm bg-red-50 rounded-lg px-3 py-2">{error}</p>}
+
+            <button type="submit" disabled={loading || mfaCode.replace(/\s/g, '').length < 6}
+              className="w-full py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 font-medium text-sm transition-colors">
+              {loading ? 'Verifying...' : 'Verify Code'}
+            </button>
+
+            <button type="button" onClick={backToCredentials}
+              className="w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+              ← Back to login
+            </button>
+          </form>
+
+          <p className="text-center text-xs text-gray-400 mt-4">
+            Lost access to your authenticator?{' '}
+            <span className="text-blue-500">Contact your IT administrator</span>
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Credentials step ───────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-emerald-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
@@ -151,6 +252,23 @@ export default function LoginPage({ onLogin }: Props) {
               <input type="tel" value={regPhone} onChange={e => setRegPhone(e.target.value)}
                 placeholder="+1 555-123-4567"
                 className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm" />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Role</label>
+              <select value={regRole} onChange={e => setRegRole(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm bg-white">
+                {!setupStatus.has_admin && <option value="admin">Admin</option>}
+                {!setupStatus.has_hr_head && <option value="hr_head">HR Head</option>}
+                <option value="employee">Employee</option>
+                <option value="hr_team">HR Team</option>
+              </select>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {regRole === 'admin' ? 'First admin — auto-approved, can log in immediately'
+                  : regRole === 'hr_head' ? 'First HR Head — auto-approved, can log in immediately'
+                  : regRole === 'hr_team' ? 'HR Team requests require HR Head approval'
+                  : 'Requires HR approval'}
+              </p>
             </div>
 
             <div>

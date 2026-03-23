@@ -1,0 +1,214 @@
+# HR Chatbot Helm Values — Phase 5 (F-59)
+#
+# Quick start:
+#   helm install hr-chatbot ./helm/hr-chatbot \
+#     --set global.image.tag=v1.0.0 \
+#     --set secrets.jwtSecretKey=CHANGE_ME_256_BIT \
+#     --set postgresql.auth.password=CHANGE_ME
+#
+# Production hardening checklist:
+#   1. Replace all CHANGE_ME values with real secrets
+#   2. Set global.image.registry to your private registry
+#   3. Configure ingress.hosts with your actual domain
+#   4. Enable TLS in ingress (certManager.enabled=true)
+#   5. Set resources.api.limits based on your load profile
+
+global:
+  image:
+    registry: ghcr.io
+    repository: your-org/hr-chatbot-api
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# ── API deployment ────────────────────────────────────────────────────────────
+api:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  service:
+    type: ClusterIP
+    port: 8000
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 10
+    failureThreshold: 3
+
+# ── Celery worker ─────────────────────────────────────────────────────────────
+worker:
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  queues: "ingestion,hrms_sync,cache_warm,webhooks,default"
+  concurrency: 4
+
+# ── Celery Beat ───────────────────────────────────────────────────────────────
+beat:
+  enabled: true
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# ── Application secrets (override with real values or use ExternalSecrets) ───
+secrets:
+  jwtSecretKey: "CHANGE_ME_minimum_256_bit_secret_key"
+  encryptionKey: ""  # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+  auditSignSecret: ""
+  hashPepper: "CHANGE_ME_random_pepper_string"
+
+# ── Ollama (LLM) ─────────────────────────────────────────────────────────────
+ollama:
+  enabled: true
+  image: ollama/ollama:latest
+  replicaCount: 1  # Scale to 3 for full load balancing
+  resources:
+    limits:
+      memory: "16Gi"
+      # nvidia.com/gpu: 1  # Uncomment for GPU node
+  persistence:
+    enabled: true
+    size: 50Gi
+    storageClass: ""
+
+# ── PostgreSQL (Bitnami sub-chart) ────────────────────────────────────────────
+postgresql:
+  enabled: true
+  auth:
+    username: hr_user
+    password: "CHANGE_ME"
+    database: hr_chatbot
+  primary:
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+    persistence:
+      enabled: true
+      size: 20Gi
+  metrics:
+    enabled: true  # postgres_exporter sidecar for Prometheus
+
+# ── PgBouncer ─────────────────────────────────────────────────────────────────
+pgbouncer:
+  enabled: true
+  image: edoburu/pgbouncer:1.22.0
+  poolMode: transaction
+  maxClientConn: 5000
+  defaultPoolSize: 25
+
+# ── Redis (Bitnami sub-chart) ─────────────────────────────────────────────────
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false  # Enable in production with redis.auth.password
+  master:
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    persistence:
+      enabled: true
+      size: 5Gi
+
+# ── Qdrant (vector store) ─────────────────────────────────────────────────────
+qdrant:
+  enabled: true
+  image:
+    repository: qdrant/qdrant
+    tag: v1.9.0
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "1Gi"
+    limits:
+      memory: "4Gi"
+  persistence:
+    enabled: true
+    size: 20Gi
+
+# ── MinIO (object storage) ────────────────────────────────────────────────────
+minio:
+  enabled: true
+  image: minio/minio:latest
+  rootUser: minioadmin
+  rootPassword: "CHANGE_ME"
+  persistence:
+    enabled: true
+    size: 50Gi
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false  # Set true for production
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+  hosts:
+    - host: hr-chatbot.example.com
+      paths:
+        - path: /api
+          pathType: Prefix
+          backend: api
+        - path: /
+          pathType: Prefix
+          backend: frontend
+  tls:
+    - secretName: hr-chatbot-tls
+      hosts:
+        - hr-chatbot.example.com
+
+# ── Pod disruption budget ──────────────────────────────────────────────────────
+podDisruptionBudget:
+  api:
+    enabled: true
+    minAvailable: 1
+  worker:
+    enabled: true
+    minAvailable: 1
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false  # Enable if Prometheus Operator is installed
+    namespace: monitoring
+    interval: 30s
+
+# ── Network policies ─────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: false  # Enable for zero-trust network isolation

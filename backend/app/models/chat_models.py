@@ -50,6 +50,9 @@ class ChatQueryResponse(BaseModel):
     flagged: bool = False
     suggested_questions: List[str] = []
     trace: Optional[RetrievalTrace] = None
+    # Phase 2: Intelligence fields
+    intent: str = "policy_lookup"
+    has_contradictions: bool = False
 
 
 class FeedbackRating(str, Enum):

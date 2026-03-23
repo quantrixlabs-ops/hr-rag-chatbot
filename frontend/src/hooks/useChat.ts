@@ -44,6 +44,8 @@ export function useChat(token: string) {
               confidence: doneData.confidence,
               faithfulness_score: doneData.faithfulness_score,
               suggested_questions: doneData.suggested_questions,
+              intent: doneData.intent,
+              has_contradictions: doneData.has_contradictions,
               timestamp: Date.now(),
             }])
           }
@@ -61,6 +63,8 @@ export function useChat(token: string) {
           faithfulness_score: data.faithfulness_score,
           query_type: data.query_type, latency_ms: data.latency_ms,
           suggested_questions: data.suggested_questions,
+          intent: data.intent,
+          has_contradictions: data.has_contradictions,
           timestamp: Date.now(),
         }])
       }

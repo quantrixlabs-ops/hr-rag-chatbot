@@ -37,6 +37,13 @@ export interface RegisterData {
   full_name?: string
   email?: string
   phone?: string
+  role?: string
+}
+
+export async function getSetupStatus(): Promise<{ has_users: boolean; has_admin: boolean; has_hr_head: boolean }> {
+  const res = await fetch(`${BASE}/auth/setup-status`)
+  if (!res.ok) return { has_users: false, has_admin: false, has_hr_head: false }
+  return res.json()
 }
 
 export async function register(data: RegisterData) {
@@ -84,6 +91,14 @@ export async function getSessions(token: string) {
   return res.json()
 }
 
+export async function deleteSession(token: string, sessionId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/chat/sessions/${sessionId}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete session')
+  return res.json()
+}
+
 export async function getSessionHistory(token: string, sessionId: string) {
   const res = await handleResponse(await fetch(`${BASE}/chat/sessions/${sessionId}/history`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch history')
@@ -107,7 +122,10 @@ export async function uploadDocument(token: string, file: File, title: string, c
   const res = await handleResponse(await fetch(`${BASE}/documents/upload`, {
     method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: fd,
   }))
-  if (!res.ok) throw new Error('Upload failed')
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Upload failed (${res.status})`)
+  }
   return res.json()
 }
 
@@ -212,6 +230,12 @@ export async function deleteSavedPrompt(token: string, promptId: number) {
 }
 
 // ── Admin: Pending Users ───────────────────────────────────────────────────
+export async function getUsers(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/admin/users`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch users')
+  return res.json()
+}
+
 export async function getPendingUsers(token: string) {
   const res = await handleResponse(await fetch(`${BASE}/admin/users/pending`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch pending users')
@@ -244,6 +268,10 @@ export interface StreamDoneData {
   confidence?: number
   faithfulness_score?: number
   suggested_questions?: string[]
+  // Phase 2 fields
+  intent?: string
+  has_contradictions?: boolean
+  query_type?: string
 }
 
 export async function sendMessageStream(
@@ -297,5 +325,398 @@ export async function sendMessageStream(
 // ── Health ──────────────────────────────────────────────────────────────────
 export async function healthCheck() {
   const res = await fetch(`${BASE}/health`)
+  return res.json()
+}
+
+// ── MFA ─────────────────────────────────────────────────────────────────────
+
+/** Called after password login when API returns mfa_required: true */
+export async function verifyMfaLogin(mfaToken: string, totpCode: string) {
+  const res = await fetch(`${BASE}/auth/mfa/verify-login`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mfa_token: mfaToken, code: totpCode }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Invalid MFA code')
+  }
+  return res.json()
+}
+
+/** Begin MFA enrollment — returns {secret, otpauth_url, qr_data_url} */
+export async function enrollMfa(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/compliance/mfa/enroll`, {
+    method: 'POST', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('MFA enrollment failed')
+  return res.json()
+}
+
+/** Confirm MFA enrollment with TOTP code — returns {recovery_codes: string[]} */
+export async function confirmMfaEnrollment(token: string, code: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/compliance/mfa/verify`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ code }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Invalid code')
+  }
+  return res.json()
+}
+
+/** Disable MFA — requires current TOTP code to confirm */
+export async function disableMfa(token: string, code: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/compliance/mfa/disable`, {
+    method: 'DELETE', headers: headers(token),
+    body: JSON.stringify({ code }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Invalid code')
+  }
+  return res.json()
+}
+
+// ── User Profile ─────────────────────────────────────────────────────────────
+
+export async function getMyProfile(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/me`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch profile')
+  return res.json()
+}
+
+export async function updateMyProfile(token: string, data: { full_name?: string; email?: string; phone?: string; department?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/me`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Update failed')
+  }
+  return res.json()
+}
+
+// ── GDPR ─────────────────────────────────────────────────────────────────────
+
+/** Article 15 — download full user data export as JSON */
+export async function exportGdprData(token: string, userId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/${userId}/gdpr-export`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('GDPR export failed')
+  return res.json()
+}
+
+/** Article 17 — request account erasure */
+export async function requestGdprErasure(token: string, userId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/${userId}/gdpr-erase`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Erasure request failed')
+  }
+  return res.json()
+}
+
+// ── Tenant Branding ──────────────────────────────────────────────────────────
+
+export interface TenantBranding {
+  company_name: string
+  primary_color?: string
+  logo_url?: string
+}
+
+export async function getTenantBranding(token: string): Promise<TenantBranding> {
+  try {
+    const res = await fetch(`${BASE}/api/v1/tenants/me/branding`, { headers: headers(token) })
+    if (!res.ok) return { company_name: 'HR Chatbot' }
+    return res.json()
+  } catch {
+    return { company_name: 'HR Chatbot' }
+  }
+}
+
+// ── Phase C: Document Approval ────────────────────────────────────────────────
+
+export async function getPendingDocuments(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/documents/pending`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch pending documents')
+  return res.json()
+}
+
+export async function approveDocument(token: string, documentId: string, action: 'approve' | 'reject', comment: string = '') {
+  const res = await handleResponse(await fetch(`${BASE}/documents/${documentId}/approve`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ action, comment }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Approval action failed')
+  }
+  return res.json()
+}
+
+// ── Phase B: Tickets ─────────────────────────────────────────────────────────
+
+export async function createTicket(token: string, data: { title: string; description?: string; category?: string; priority?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to create ticket')
+  }
+  return res.json()
+}
+
+export async function getTickets(token: string, params?: { status?: string; category?: string; priority?: string; page?: number; limit?: number }) {
+  const query = new URLSearchParams()
+  if (params?.status) query.set('status', params.status)
+  if (params?.category) query.set('category', params.category)
+  if (params?.priority) query.set('priority', params.priority)
+  if (params?.page) query.set('page', String(params.page))
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  const res = await handleResponse(await fetch(`${BASE}/tickets${qs ? '?' + qs : ''}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch tickets')
+  return res.json()
+}
+
+export async function getTicket(token: string, ticketId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch ticket')
+  return res.json()
+}
+
+export async function updateTicket(token: string, ticketId: string, data: { status?: string; priority?: string; assigned_to?: string; comment?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to update ticket')
+  }
+  return res.json()
+}
+
+export async function addTicketComment(token: string, ticketId: string, comment: string) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}/comment`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ comment }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to add comment')
+  }
+  return res.json()
+}
+
+export async function respondToTicket(token: string, ticketId: string, data: { action: 'accept' | 'reject'; feedback?: string; rating?: number }) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}/respond`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to respond to ticket')
+  }
+  return res.json()
+}
+
+export async function getTicketStats(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/stats/summary`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch ticket stats')
+  return res.json()
+}
+
+// ── Phase D: Notifications ──────────────────────────────────────────────────
+
+export async function getNotifications(token: string, unreadOnly = false) {
+  const qs = unreadOnly ? '?unread_only=true' : ''
+  const res = await handleResponse(await fetch(`${BASE}/notifications${qs}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch notifications')
+  return res.json()
+}
+
+export async function getUnreadCount(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/notifications/unread-count`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch unread count')
+  return res.json()
+}
+
+export async function markNotificationRead(token: string, notificationId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/notifications/${notificationId}/read`, {
+    method: 'POST', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to mark notification read')
+  return res.json()
+}
+
+export async function markAllNotificationsRead(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/notifications/read-all`, {
+    method: 'POST', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to mark all read')
+  return res.json()
+}
+
+export async function sendNotification(token: string, data: { user_id: string; title: string; message?: string; notification_type?: string; link?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/notifications/send`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to send notification')
+  }
+  return res.json()
+}
+
+// ── Phase D: Complaints ─────────────────────────────────────────────────────
+
+export async function submitComplaint(token: string, data: { category?: string; description: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/complaints`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to submit complaint')
+  }
+  return res.json()
+}
+
+export async function getComplaints(token: string, params?: { status?: string; category?: string; page?: number; limit?: number }) {
+  const query = new URLSearchParams()
+  if (params?.status) query.set('status', params.status)
+  if (params?.category) query.set('category', params.category)
+  if (params?.page) query.set('page', String(params.page))
+  if (params?.limit) query.set('limit', String(params.limit))
+  const qs = query.toString()
+  const res = await handleResponse(await fetch(`${BASE}/complaints${qs ? '?' + qs : ''}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch complaints')
+  return res.json()
+}
+
+export async function getComplaint(token: string, complaintId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/complaints/${complaintId}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch complaint')
+  return res.json()
+}
+
+export async function reviewComplaint(token: string, complaintId: string, data: { status: string; resolution?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/complaints/${complaintId}`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to review complaint')
+  }
+  return res.json()
+}
+
+export async function getComplaintStats(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/complaints/stats/summary`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch complaint stats')
+  return res.json()
+}
+
+// ── Phase F: Branches ───────────────────────────────────────────────────────
+
+export async function getBranches(token: string, activeOnly = true) {
+  const qs = activeOnly ? '?active_only=true' : '?active_only=false'
+  const res = await handleResponse(await fetch(`${BASE}/branches${qs}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch branches')
+  return res.json()
+}
+
+export async function getBranch(token: string, branchId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/branches/${branchId}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch branch')
+  return res.json()
+}
+
+export async function createBranch(token: string, data: { name: string; location?: string; address?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/branches`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to create branch')
+  }
+  return res.json()
+}
+
+export async function updateBranch(token: string, branchId: string, data: { name?: string; location?: string; address?: string; is_active?: boolean }) {
+  const res = await handleResponse(await fetch(`${BASE}/branches/${branchId}`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to update branch')
+  }
+  return res.json()
+}
+
+export async function deleteBranch(token: string, branchId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/branches/${branchId}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete branch')
+  return res.json()
+}
+
+export async function getBranchStats(token: string, branchId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/branches/${branchId}/stats`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch branch stats')
+  return res.json()
+}
+
+// ── Phase F: HR Contacts ────────────────────────────────────────────────────
+
+export async function getHRContacts(token: string, branchId?: string) {
+  const params = new URLSearchParams()
+  if (branchId) params.set('branch_id', branchId)
+  const qs = params.toString()
+  const res = await handleResponse(await fetch(`${BASE}/hr-contacts${qs ? '?' + qs : ''}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch HR contacts')
+  return res.json()
+}
+
+export async function createHRContact(token: string, data: { name: string; role?: string; email?: string; phone?: string; branch_id?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/hr-contacts`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to create contact')
+  }
+  return res.json()
+}
+
+export async function updateHRContact(token: string, contactId: string, data: { name?: string; role?: string; email?: string; phone?: string; branch_id?: string; is_available?: boolean }) {
+  const res = await handleResponse(await fetch(`${BASE}/hr-contacts/${contactId}`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify(data),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to update contact')
+  }
+  return res.json()
+}
+
+export async function deleteHRContact(token: string, contactId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/hr-contacts/${contactId}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete contact')
   return res.json()
 }

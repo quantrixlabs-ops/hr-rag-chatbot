@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 
@@ -30,16 +32,21 @@ class Settings(BaseSettings):
     embedding_dimension: int = 768
 
     # ── Vector Store (Section 7) ─────────────────────────────────────────
-    vector_store_backend: str = "faiss"  # "faiss" | "qdrant"
+    # Primary: qdrant (self-hosted, supports tenant_id filtering for Phase 3)
+    # Fallback: faiss (in-process, for local dev without Docker)
+    vector_store_backend: str = "qdrant"  # "qdrant" | "faiss"
     qdrant_url: str = "http://localhost:6333"
+    qdrant_collection: str = "hr_chunks"
     faiss_index_dir: str = "./data/faiss_index"
 
     # ── Database ─────────────────────────────────────────────────────────
-    database_url: str = "sqlite:///./data/hr_chatbot.db"
-    db_path: str = "./data/hr_chatbot.db"
+    # Primary: PostgreSQL (concurrent writes, row-level security in Phase 3)
+    # Fallback: SQLite (local dev without Docker)
+    database_url: str = "postgresql://hr_user:hr_dev_password_change_in_prod@localhost:5432/hr_chatbot"
+    db_path: str = "./data/hr_chatbot.db"  # SQLite fallback
 
     # ── Redis ────────────────────────────────────────────────────────────
-    redis_url: str = "redis://localhost:6379"
+    redis_url: str = "redis://localhost:6379/0"
 
     # ── RAG Pipeline (Section 4.2) ───────────────────────────────────────
     dense_top_k: int = 20
@@ -60,7 +67,30 @@ class Settings(BaseSettings):
     hr_contact_email: str = "your HR department"  # PHASE 7: no hardcoded email
 
     # ── File Storage ─────────────────────────────────────────────────────
-    upload_dir: str = "./data/uploads"
+    # ── File Storage — Phase 3: MinIO (primary), local (fallback) ────────────
+    storage_backend: str = "minio"
+    upload_dir: str = "./data/uploads"       # local fallback path
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin123"
+    minio_bucket: str = "hr-documents"
+
+    # ── SSO (per-tenant config, not global) ──────────────────────────────────
+    sso_enabled: bool = False                # global switch; per-tenant via config.features.sso
+
+    # ── Phase 4: Multi-model routing ────────────────────────────────────
+    model_fast: str = ""      # e.g. "llama3.2:3b"
+    model_standard: str = ""  # e.g. "llama3.1:8b"
+    model_advanced: str = ""  # e.g. "llama3.1:70b"
+
+    # ── Phase 4: Multi-Ollama load balancing ─────────────────────────────
+    ollama_nodes: str = ""    # Comma-separated URLs; empty → use ollama_base_url
+
+    # ── Phase 4: Read replica ─────────────────────────────────────────────
+    read_replica_url: str = ""  # Empty → use primary for all reads
+
+    # ── Phase 4: HRMS ─────────────────────────────────────────────────────
+    hrms_cache_ttl_seconds: int = 14400  # 4 hours
 
     # ── Enterprise Security (Phase B) ─────────────────────────────────
     admin_allowed_ips: str = ""  # Comma-separated IPs, empty = allow all

@@ -1,0 +1,116 @@
+groups:
+  # ── HR Chatbot Application Alerts ──────────────────────────────────────────
+  - name: hr_chatbot_application
+    interval: 60s
+    rules:
+
+      # LLM inference failure rate > 1% over 5 minutes
+      - alert: LLMHighErrorRate
+        expr: |
+          rate(hr_chatbot_llm_errors_total[5m]) /
+          rate(hr_chatbot_query_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High LLM error rate"
+          description: "LLM error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+          runbook: "Check Ollama logs. Possible: model not loaded, OOM, or network issue."
+
+      # Query latency p95 > 10 seconds
+      - alert: HighQueryLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(hr_chatbot_query_latency_seconds_bucket[5m])
+          ) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High query latency (p95 > 10s)"
+          description: "p95 query latency is {{ $value }}s. Check LLM load and cache hit rate."
+
+      # All Ollama nodes unhealthy (load balancer has 0 healthy nodes)
+      - alert: AllLLMNodesDown
+        expr: sum(hr_chatbot_llm_node_in_flight) == 0 and rate(hr_chatbot_query_total[1m]) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All LLM nodes are unreachable"
+          description: "No Ollama nodes responding. Chat queries will fail."
+
+      # Document ingestion failure rate > 10%
+      - alert: HighIngestionFailureRate
+        expr: |
+          rate(hr_chatbot_ingestion_total{status="failed"}[10m]) /
+          rate(hr_chatbot_ingestion_total[10m]) > 0.10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High document ingestion failure rate"
+          description: "{{ $value | humanizePercentage }} of ingestions failing. Check worker logs."
+
+      # Cache hit rate below 20% (expected 35-50% in production)
+      - alert: LowCacheHitRate
+        expr: |
+          rate(hr_chatbot_cache_hits_total[1h]) /
+          (rate(hr_chatbot_cache_hits_total[1h]) + rate(hr_chatbot_cache_misses_total[1h])) < 0.20
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Low semantic cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Cache warming may be needed."
+
+  # ── Security Alerts ─────────────────────────────────────────────────────────
+  - name: hr_chatbot_security
+    interval: 30s
+    rules:
+
+      # Multiple failed login attempts in 5 minutes (brute force indicator)
+      - alert: BruteForceDetected
+        expr: |
+          increase(hr_chatbot_auth_attempts_total{status="failed"}[5m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: "Possible brute force attack"
+          description: "{{ $value }} failed auth attempts in 5 minutes for tenant {{ $labels.tenant_id }}."
+
+      # High error rate across all endpoints
+      - alert: HighApplicationErrorRate
+        expr: |
+          rate(hr_chatbot_errors_total[5m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated application error rate"
+          description: "{{ $value }} errors/s. Check API logs."
+
+  # ── Infrastructure Alerts ───────────────────────────────────────────────────
+  - name: hr_chatbot_infrastructure
+    interval: 60s
+    rules:
+
+      # Redis unavailable (semantic cache + Celery broker down)
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis unavailable. Celery workers and semantic cache are non-functional."
+
+      # PostgreSQL connection pool near exhaustion
+      - alert: DBPoolExhaustion
+        expr: hr_chatbot_db_pool_size{role="primary"} > 45
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB connection pool near limit"
+          description: "PgBouncer pool size {{ $value }}/50. Check for connection leaks."

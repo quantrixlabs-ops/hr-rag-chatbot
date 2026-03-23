@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react'
-import { X, FileText, ChevronLeft, ChevronRight, BookOpen, Hash, Layers, Tag } from 'lucide-react'
+import { X, FileText, ChevronLeft, ChevronRight, BookOpen, Hash, Layers, Tag, Search } from 'lucide-react'
 import { getDocumentContent } from '../services/api'
 import type { Citation } from '../types/chat'
 
@@ -22,6 +22,38 @@ interface Props {
   token: string
   citation: Citation
   onClose: () => void
+}
+
+/**
+ * Find the section (1-indexed) whose text best matches the citation excerpt.
+ * Returns the page number to navigate to.
+ */
+function findExcerptPage(pages: DocumentPage[], excerpt: string): number {
+  if (!excerpt || excerpt.length < 10 || pages.length === 0) return 1
+
+  const clean = excerpt.replace(/\s+/g, ' ').trim().toLowerCase()
+
+  // Try progressively shorter substrings of the excerpt
+  for (const len of [100, 60, 40, 25]) {
+    const needle = clean.substring(0, Math.min(len, clean.length))
+    for (let i = 0; i < pages.length; i++) {
+      if (pages[i].text.toLowerCase().includes(needle)) return i + 1
+    }
+  }
+
+  // Fallback: score each page by keyword overlap with the excerpt
+  const excerptWords = new Set(clean.split(/\s+/).filter(w => w.length > 3))
+  if (excerptWords.size === 0) return 1
+
+  let bestPage = 1
+  let bestScore = 0
+  for (let i = 0; i < pages.length; i++) {
+    const pageWords = pages[i].text.toLowerCase()
+    let score = 0
+    excerptWords.forEach(w => { if (pageWords.includes(w)) score++ })
+    if (score > bestScore) { bestScore = score; bestPage = i + 1 }
+  }
+  return bestPage
 }
 
 /** Convert markdown-like text to styled HTML */
@@ -55,7 +87,7 @@ function renderMarkdown(text: string, excerpt: string): string {
   if (excerpt && excerpt.length >= 10) {
     const cleanExcerpt = excerpt.replace(/\s+/g, ' ').trim()
     // Try progressively shorter matches
-    for (const len of [80, 50, 30]) {
+    for (const len of [80, 50, 30, 20]) {
       const search = cleanExcerpt.substring(0, Math.min(len, cleanExcerpt.length))
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       const regex = new RegExp(`(${escaped})`, 'i')
@@ -87,26 +119,40 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
+  const [sourcePage, setSourcePage] = useState(1) // the page where the excerpt was actually found
   const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setLoading(true)
     setError('')
-    fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/documents`, {
+    const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+    fetch(`${base}/documents`, {
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     })
       .then(r => r.json())
       .then(data => {
-        const match = (data.documents || []).find((d: any) =>
-          d.title === citation.source || d.title.includes(citation.source) || citation.source.includes(d.title)
-        )
-        if (!match) { setError(`Document "${citation.source}" not found`); setLoading(false); return }
+        const docs = data.documents || []
+        const src = (citation.source || '').toLowerCase().trim()
+        // Try exact match first, then partial matches
+        const match = docs.find((d: any) => d.title.toLowerCase() === src)
+          || docs.find((d: any) => d.title.toLowerCase().includes(src) || src.includes(d.title.toLowerCase()))
+          || docs.find((d: any) => {
+            // Fuzzy: compare words overlap
+            const srcWords = src.split(/\s+/)
+            const titleWords = d.title.toLowerCase().split(/\s+/)
+            const overlap = srcWords.filter((w: string) => titleWords.includes(w)).length
+            return overlap >= Math.min(2, srcWords.length)
+          })
+        if (!match) { setError(`Document "${citation.source}" not found in your documents list`); setLoading(false); return }
         return getDocumentContent(token, match.document_id)
       })
       .then(content => {
         if (content) {
           setDoc(content)
-          if (citation.page) setCurrentPage(Math.min(citation.page, content.pages.length))
+          // Find the actual section containing the cited excerpt — NOT just citation.page
+          const found = findExcerptPage(content.pages, citation.excerpt)
+          setSourcePage(found)
+          setCurrentPage(found)
         }
       })
       .catch(() => setError('Failed to load document'))
@@ -119,7 +165,7 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
       setTimeout(() => {
         const el = document.getElementById('highlight-target')
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }, 100)
+      }, 150)
     }
   }, [currentPage, loading, doc])
 
@@ -182,7 +228,7 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
         <div className="px-6 py-2.5 bg-amber-50 border-b border-amber-100 flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
           <span className="text-xs font-medium text-amber-700">
-            Answer sourced from {citation.page ? `Section ${citation.page}` : 'this document'}
+            Answer sourced from Section {sourcePage}
           </span>
           {citation.excerpt && (
             <span className="text-xs text-amber-500 ml-1 truncate max-w-md">
@@ -208,8 +254,8 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
                     }`}>
                     <span className="text-[10px] text-gray-400 mr-1.5">{s.page}.</span>
                     {s.title}
-                    {citation.page === s.page && (
-                      <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+                    {sourcePage === s.page && (
+                      <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-amber-400" title="Source section" />
                     )}
                   </button>
                 ))}
@@ -255,12 +301,12 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
               <span className="text-sm text-gray-500">
                 Section <strong className="text-gray-700">{currentPage}</strong> of {doc.pages.length}
               </span>
-              {citation.page && citation.page !== currentPage && (
+              {sourcePage !== currentPage && (
                 <button
-                  onClick={() => setCurrentPage(citation.page!)}
-                  className="text-xs font-medium bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg hover:bg-amber-200 transition-colors"
+                  onClick={() => setCurrentPage(sourcePage)}
+                  className="flex items-center gap-1.5 text-xs font-medium bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg hover:bg-amber-200 transition-colors"
                 >
-                  Jump to source
+                  <Search size={12} /> Jump to source
                 </button>
               )}
             </div>

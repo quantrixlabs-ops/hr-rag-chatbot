@@ -23,7 +23,9 @@ from backend.app.prompts.system_prompt import SYSTEM_PROMPT, filter_prompt_leaka
 from backend.app.rag.context_builder import ContextBuilder
 from backend.app.rag.orchestrator import ModelGateway
 from backend.app.rag.query_analyzer import QueryAnalyzer
+from backend.app.services.faq_service import FAQService
 from backend.app.services.retrieval_service import RetrievalOrchestrator
+from backend.app.services.contradiction_detector import ContradictionDetector
 from backend.app.services.verification_service import AnswerVerifier, handle_ungrounded
 
 logger = structlog.get_logger()
@@ -138,6 +140,41 @@ class RAGPipeline:
         self.verifier = verifier
         self.s = settings or get_settings()
         self.qa = QueryAnalyzer()
+        self.contradiction_detector = ContradictionDetector()
+        self.faq = FAQService()
+
+    def _multi_retrieve(self, sub_queries, role_filter, fallback_query):
+        """Phase 1: Execute each sub-query separately and merge results (deduplicated)."""
+        seen_ids = set()
+        merged_chunks = []
+        merged_meta = {}
+
+        for sq in sub_queries[:3]:  # Cap at 3 sub-queries to limit latency
+            try:
+                sq_chunks, sq_meta = self.retrieval.retrieve(sq.strip(), role_filter=role_filter)
+                for c in sq_chunks:
+                    if c.chunk_id not in seen_ids:
+                        seen_ids.add(c.chunk_id)
+                        merged_chunks.append(c)
+            except Exception as e:
+                logger.warning("sub_query_retrieval_failed", sub_query=sq[:60], error=str(e))
+
+        if not merged_chunks:
+            # Fallback to single retrieval with the enriched query
+            return self.retrieval.retrieve(fallback_query, role_filter=role_filter)
+
+        # Sort merged chunks by score descending, keep top N
+        merged_chunks.sort(key=lambda c: c.score, reverse=True)
+        max_chunks = 8  # reasonable upper limit
+        merged_chunks = merged_chunks[:max_chunks]
+
+        logger.info(
+            "multi_retrieval_complete",
+            sub_query_count=len(sub_queries),
+            total_chunks=len(merged_chunks),
+            unique_sources=len({c.source for c in merged_chunks}),
+        )
+        return merged_chunks, merged_meta
 
     def _expand_query(self, query: str, analysis) -> str:
         """Use LLM to expand a query for better retrieval coverage."""
@@ -192,6 +229,193 @@ class RAGPipeline:
         suggestions = [s for s in suggestions if s.lower() != query_lower]
         return suggestions[:3]
 
+    # ── Phase 2: Multi-question decomposition ──────────────────────────────
+
+    def _answer_compound_query(
+        self,
+        analysis,
+        user_role: str,
+        session_turns,
+        department,
+        role_filter,
+        t0: float,
+    ) -> ChatResult:
+        """Answer each sub-query independently, then merge into a structured response.
+
+        This avoids the problem where a single LLM call with merged context
+        ignores one of the questions or conflates topics.
+        """
+        sub_answers = []
+        all_chunks = []
+        all_citations = []
+        min_confidence = 1.0
+        seen_chunk_ids = set()
+
+        for i, sq in enumerate(analysis.sub_queries[:3]):
+            try:
+                sq_chunks, _ = self.retrieval.retrieve(sq.strip(), role_filter=role_filter)
+            except Exception as e:
+                logger.warning("sub_query_retrieval_failed", sub_query=sq[:60], error=str(e))
+                sq_chunks = []
+
+            if not sq_chunks:
+                sub_answers.append({
+                    "question": sq.strip(),
+                    "answer": "I don't have enough information in our HR documents to answer this part.",
+                    "confidence": 0.0,
+                    "citations": [],
+                })
+                continue
+
+            # Deduplicate chunks across sub-queries
+            unique_chunks = []
+            for c in sq_chunks:
+                if c.chunk_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(c.chunk_id)
+                    unique_chunks.append(c)
+                    all_chunks.append(c)
+
+            context = self.ctx.build(unique_chunks if unique_chunks else sq_chunks)
+            prompt = _build_prompt(
+                sq.strip(), context, session_turns,
+                self.s.company_name, self.s.hr_contact_email,
+                user_role, department,
+            )
+
+            try:
+                llm_resp = self.llm.generate(
+                    prompt, self.s.llm_model,
+                    self.s.llm_temperature, self.s.max_response_tokens,
+                )
+                answer_text = filter_prompt_leakage(llm_resp.text)
+            except Exception as e:
+                logger.error("sub_query_llm_failed", sub_query=sq[:60], error=str(e))
+                sub_answers.append({
+                    "question": sq.strip(),
+                    "answer": "I encountered an error answering this part. Please try again.",
+                    "confidence": 0.0,
+                    "citations": [],
+                })
+                continue
+
+            verification = self.verifier.verify(
+                answer_text, sq_chunks, sq.strip(),
+                intent=analysis.intent,
+                analysis_confidence=analysis.analysis_confidence,
+            )
+            answer_text = handle_ungrounded(verification, answer_text)
+            min_confidence = min(min_confidence, verification.faithfulness_score)
+            all_citations.extend(verification.citations)
+
+            sub_answers.append({
+                "question": sq.strip(),
+                "answer": answer_text,
+                "confidence": verification.faithfulness_score,
+                "citations": verification.citations,
+            })
+
+        # ── Merge into structured response ────────────────────────────────
+        merged = self._merge_sub_answers(sub_answers)
+
+        # Deduplicate citations by source name
+        seen_sources = set()
+        unique_citations = []
+        for c in all_citations:
+            if c.source not in seen_sources:
+                seen_sources.add(c.source)
+                unique_citations.append(c)
+
+        # Content safety + PII on merged answer
+        from backend.app.core.content_safety import check_content_safety, sanitize_response
+        safety = check_content_safety(merged)
+        merged = sanitize_response(merged)
+        merged = mask_pii(merged)
+
+        ms = (time.time() - t0) * 1000
+        suggestions = self._generate_suggestions(
+            analysis.original_query, merged, all_chunks
+        )
+
+        return ChatResult(
+            answer=merged,
+            session_id="",
+            citations=unique_citations,
+            confidence=min_confidence,
+            faithfulness_score=min_confidence,
+            query_type="compound",
+            latency_ms=ms,
+            flagged=not safety["safe"],
+            chunks=all_chunks,
+            suggested_questions=suggestions,
+            intent=analysis.intent,
+            analysis_confidence=analysis.analysis_confidence,
+            is_sensitive=analysis.is_sensitive,
+            emotional_tone=analysis.emotional_tone,
+        )
+
+    def _merge_sub_answers(self, sub_answers: list) -> str:
+        """Merge multiple sub-answers into a well-structured combined response."""
+        if len(sub_answers) == 1:
+            return sub_answers[0]["answer"]
+
+        parts = []
+        for i, sa in enumerate(sub_answers, 1):
+            q = sa["question"]
+            a = sa["answer"]
+            # Strip existing disclaimers from sub-answers to avoid repetition
+            a = a.replace(
+                "I was unable to find sufficient evidence in our HR documents "
+                "to fully answer this question. Please verify with HR directly.\n\n", ""
+            ).replace(
+                "Note: Parts of this answer may not be fully supported by our "
+                "HR documents. Sources are cited where available.\n\n", ""
+            ).strip()
+            parts.append(f"**{i}. {q}**\n\n{a}")
+
+        return "\n\n---\n\n".join(parts)
+
+    # ── Phase 1: Sensitive & emotional handling helpers ───────────────────
+
+    def _get_sensitive_guidance(self, analysis) -> str:
+        """Return a tailored guidance suffix for sensitive topics."""
+        guidance = {
+            "termination": (
+                "\n\n**Important:** Questions about termination are sensitive. "
+                "For your specific situation, please contact HR directly at {hr_contact}. "
+                "All conversations regarding employment status are confidential."
+            ),
+            "harassment": (
+                "\n\n**Important:** If you are experiencing harassment, please report it immediately. "
+                "You can contact HR at {hr_contact}, your manager, or use the anonymous ethics hotline. "
+                "All reports are treated confidentially and retaliation is strictly prohibited."
+            ),
+            "disciplinary": (
+                "\n\n**Note:** For questions about your specific disciplinary situation, "
+                "please speak with your manager or HR at {hr_contact} directly."
+            ),
+            "salary_negotiation": (
+                "\n\n**Note:** For specific compensation discussions, please schedule a meeting "
+                "with your manager or HR at {hr_contact}."
+            ),
+            "whistleblower": (
+                "\n\n**Important:** Whistleblower protections are taken very seriously. "
+                "If you need to report a concern, you can do so anonymously through the ethics hotline "
+                "or contact HR at {hr_contact}. Retaliation against whistleblowers is prohibited."
+            ),
+        }
+        template = guidance.get(analysis.sensitive_category, "")
+        return template.format(hr_contact=self.s.hr_contact_email) if template else ""
+
+    def _get_emotional_acknowledgment(self, tone: str) -> str:
+        """Return an empathetic opening for emotionally charged queries."""
+        acknowledgments = {
+            "stressed": "I understand this can be a stressful situation. ",
+            "worried": "I understand you may be concerned. Let me help clarify. ",
+            "frustrated": "I hear your frustration. Let me provide the relevant information. ",
+            "upset": "I'm sorry you're going through this. Here's what I can share. ",
+        }
+        return acknowledgments.get(tone, "")
+
     def query(
         self,
         query: str,
@@ -220,6 +444,21 @@ class RAGPipeline:
                 faithfulness_score=1.0, query_type="greeting", latency_ms=ms,
             )
 
+        # ── Stage 0a: FAQ fast-path — curated answers bypass RAG ─────────
+        try:
+            faq_match = self.faq.match(query)
+            if faq_match:
+                ms = (time.time() - t0) * 1000
+                logger.info("faq_hit", query=query[:80], faq_id=faq_match["faq_id"],
+                            score=faq_match["score"])
+                return ChatResult(
+                    answer=faq_match["answer"],
+                    session_id="", citations=[], confidence=1.0,
+                    faithfulness_score=1.0, query_type="faq", latency_ms=ms,
+                )
+        except Exception as e:
+            logger.warning("faq_lookup_failed", error=str(e))
+
         # ── Stage 0: Language check ──────────────────────────────────────
         if analysis.language != "en":
             ms = (time.time() - t0) * 1000
@@ -243,6 +482,17 @@ class RAGPipeline:
                 faithfulness_score=1.0, query_type="clarification", latency_ms=ms,
             )
 
+        # ── Phase 2: Compound query decomposition (Phase 4: safe fallback) ──
+        if analysis.requires_multi_retrieval and len(analysis.sub_queries) > 1:
+            role_filter = get_allowed_roles(user_role)
+            try:
+                return self._answer_compound_query(
+                    analysis, user_role, session_turns, department, role_filter, t0,
+                )
+            except Exception as e:
+                logger.error("compound_query_failed_fallback_to_single", error=str(e))
+                # Fall through to single-query path instead of crashing
+
         # ── Stage 1: Query Expansion + Retrieval ─────────────────────────
         try:
             enriched = _inject_context(query, session_turns) if session_turns else query
@@ -263,6 +513,24 @@ class RAGPipeline:
                 faithfulness_score=0.0, query_type=analysis.query_type, latency_ms=ms,
             )
 
+        # ── Stage 1b: Contradiction detection (Phase 2, Phase 4: safe fallback) ─
+        try:
+            contradiction_result = self.contradiction_detector.detect(chunks, query)
+            contradiction_warning = contradiction_result.warning_message if contradiction_result.has_contradictions else ""
+        except Exception as e:
+            logger.warning("contradiction_detection_failed", error=str(e))
+            from backend.app.services.contradiction_detector import ContradictionResult
+            contradiction_result = ContradictionResult(has_contradictions=False, contradictions=[], warning_message="")
+            contradiction_warning = ""
+
+        # ── Stage 1c: Sensitive query guidance (Phase 1) ──────────────────
+        sensitive_prefix = ""
+        if analysis.is_sensitive:
+            sensitive_prefix = self._get_sensitive_guidance(analysis)
+        emotional_prefix = ""
+        if analysis.emotional_tone and analysis.emotional_tone != "neutral":
+            emotional_prefix = self._get_emotional_acknowledgment(analysis.emotional_tone)
+
         # ── Stage 2: Context + Prompt (with personalization) ─────────────
         context = self.ctx.build(chunks)
         prompt = _build_prompt(
@@ -270,6 +538,16 @@ class RAGPipeline:
             self.s.company_name, self.s.hr_contact_email,
             user_role, department,
         )
+
+        # ── Stage 2b: Calculation reasoning hint (Phase 1) ────────────────
+        if analysis.is_calculation:
+            prompt += (
+                "\n\nIMPORTANT: This is a calculation-related question. "
+                "Show the relevant policy values and formulas from the documents. "
+                "If the answer requires personal data (hire date, grade, etc.), "
+                "state what data is needed and direct them to HR. "
+                "Never invent specific numbers for the employee."
+            )
 
         # ── Stage 3: LLM Generation ─────────────────────────────────────
         try:
@@ -289,8 +567,22 @@ class RAGPipeline:
             )
 
         # ── Stage 4: Verification ────────────────────────────────────────
-        verification = self.verifier.verify(answer_text, chunks, query)
+        verification = self.verifier.verify(
+            answer_text, chunks, query,
+            intent=analysis.intent,
+            analysis_confidence=analysis.analysis_confidence,
+        )
         answer = handle_ungrounded(verification, answer_text)
+
+        # ── Stage 4a-ii: Prepend sensitive/emotional context (Phase 1) ────
+        if emotional_prefix and not answer.startswith("I was unable") and not answer.startswith("Note:"):
+            answer = emotional_prefix + answer
+        if sensitive_prefix and not answer.startswith("I was unable"):
+            answer = answer + sensitive_prefix
+
+        # ── Stage 4a-iii: Append contradiction warning (Phase 2) ──────────
+        if contradiction_warning:
+            answer = answer + contradiction_warning
 
         # ── Stage 4b: Content safety filter ──────────────────────────────
         from backend.app.core.content_safety import check_content_safety, sanitize_response
@@ -320,7 +612,24 @@ class RAGPipeline:
             citation_count=len(verification.citations),
             verdict=verification.verdict,
             latency_ms=round(ms),
+            # Phase 4: Extended audit fields
+            intent=analysis.intent,
+            is_sensitive=analysis.is_sensitive,
+            has_contradictions=contradiction_result.has_contradictions,
         )
+
+        # ── Phase 4: Audit trail for sensitive/flagged queries ────────────
+        if analysis.is_sensitive or flagged or contradiction_result.has_contradictions:
+            from backend.app.core.security import log_security_event
+            log_security_event("query_audit_trail", {
+                "intent": analysis.intent,
+                "is_sensitive": analysis.is_sensitive,
+                "sensitive_category": analysis.sensitive_category,
+                "has_contradictions": contradiction_result.has_contradictions,
+                "flagged": flagged,
+                "confidence": round(verification.faithfulness_score, 3),
+                "query_type": analysis.query_type,
+            })
 
         # ── Stage 5: Generate follow-up suggestions ─────────────────────
         suggestions = self._generate_suggestions(query, answer, chunks)
@@ -337,6 +646,11 @@ class RAGPipeline:
             chunks=chunks,
             verification=verification,
             suggested_questions=suggestions,
+            intent=analysis.intent,
+            analysis_confidence=analysis.analysis_confidence,
+            is_sensitive=analysis.is_sensitive,
+            emotional_tone=analysis.emotional_tone,
+            has_contradictions=contradiction_result.has_contradictions,
         )
 
     def _store_version(self, query, answer, verification, safety, chunks):
@@ -364,16 +678,18 @@ class RAGPipeline:
         try:
             import hashlib
             import json as _json
+            from backend.app.core.tenant import get_current_tenant
             # SECTION 3: Store only query hash — never store raw queries
             query_hash = hashlib.sha256(mask_pii(query).encode()).hexdigest()[:16]
             sources = list({c.source for c in chunks}) if chunks else []
+            tenant_id = get_current_tenant()
             with sqlite3.connect(self.s.db_path) as con:
                 con.execute(
                     "INSERT INTO query_logs (query,query_type,user_role,faithfulness_score,"
-                    "hallucination_risk,latency_ms,top_chunk_score,sources_used,timestamp) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "hallucination_risk,latency_ms,top_chunk_score,sources_used,timestamp,tenant_id) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (query_hash, qtype, role, v.faithfulness_score, v.hallucination_risk,
-                     ms, chunks[0].score if chunks else 0, _json.dumps(sources), time.time()),
+                     ms, chunks[0].score if chunks else 0, _json.dumps(sources), time.time(), tenant_id),
                 )
         except Exception as e:
             logger.warning("query_log_failed", error=str(e))

@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import uuid
+from collections import defaultdict
 
 import structlog
 from fastapi import Depends, HTTPException, status
@@ -20,11 +21,17 @@ from backend.app.models.chat_models import User
 logger = structlog.get_logger("audit")
 security_scheme = HTTPBearer()
 
-# ── Role hierarchy (Section 13.1) ────────────────────────────────────────────
+# ── Role hierarchy (Phase 2 + Phase A: 6 roles) ─────────────────────────────
+# Permission details live in core/permissions.py.
+# Phase A adds hr_team, hr_head (+ admin/hr_head aliases for super_admin/hr_admin).
 ROLE_HIERARCHY: dict[str, list[str]] = {
-    "employee": ["employee"],
-    "manager": ["employee", "manager"],
-    "hr_admin": ["employee", "manager", "hr_admin"],
+    "employee":    ["employee"],
+    "manager":     ["employee", "manager"],
+    "hr_team":     ["employee", "hr_team"],
+    "hr_admin":    ["employee", "manager", "hr_team", "hr_admin"],
+    "hr_head":     ["employee", "manager", "hr_team", "hr_head"],  # Alias for hr_admin
+    "super_admin": ["employee", "manager", "hr_team", "hr_admin", "hr_head", "super_admin"],
+    "admin":       ["employee", "manager", "hr_team", "hr_admin", "hr_head", "admin"],  # Alias for super_admin
 }
 
 # ── Prompt injection patterns (Section 17.2) ────────────────────────────────
@@ -206,8 +213,8 @@ def can_access_document(user_role: str, doc_roles: list[str]) -> bool:
 
 
 def require_role(user: User, minimum_role: str) -> None:
-    order = {"employee": 0, "manager": 1, "hr_admin": 2}
-    if order.get(user.role, 0) < order.get(minimum_role, 0):
+    from backend.app.core.permissions import get_role_level
+    if get_role_level(user.role) < get_role_level(minimum_role):
         raise HTTPException(403, "Insufficient permissions")
 
 
@@ -224,8 +231,43 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # ── Query sanitization ───────────────────────────────────────────────────────
+
+# Phase 4: Zero-width and invisible Unicode characters used in evasion attacks
+_ZERO_WIDTH_CHARS = re.compile(
+    "[\u200b\u200c\u200d\u200e\u200f\u2060\u2061\u2062\u2063\u2064\ufeff\u00ad\u034f\u180e]"
+)
+
+# Phase 4: Homoglyph normalization — common Cyrillic/Greek lookalikes → Latin
+_HOMOGLYPH_MAP: dict[str, str] = {
+    "\u0410": "A", "\u0412": "B", "\u0421": "C", "\u0415": "E",
+    "\u041d": "H", "\u041a": "K", "\u041c": "M", "\u041e": "O",
+    "\u0420": "P", "\u0422": "T", "\u0425": "X",
+    "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+    "\u0441": "c", "\u0443": "y", "\u0445": "x",
+}
+
+
 def sanitize_query(query: str) -> str:
-    """Strip potentially dangerous content from user queries."""
+    """Strip potentially dangerous content from user queries.
+
+    Phase 4 hardening:
+    - Unicode NFKC normalization (prevents fullwidth/compatibility bypasses)
+    - Zero-width character stripping (prevents invisible injection)
+    - Basic homoglyph normalization (Cyrillic/Greek → Latin)
+    - HTML tag removal, control character removal
+    """
+    import unicodedata
+
+    # Phase 4: Unicode NFKC normalization (e.g. ＩＧＮＯＲＥpreivous → IGNORE previous)
+    query = unicodedata.normalize("NFKC", query)
+
+    # Phase 4: Remove zero-width / invisible characters
+    query = _ZERO_WIDTH_CHARS.sub("", query)
+
+    # Phase 4: Normalize common homoglyphs (Cyrillic/Greek → Latin)
+    for cyr, lat in _HOMOGLYPH_MAP.items():
+        query = query.replace(cyr, lat)
+
     # Remove HTML/script tags
     query = re.sub(r"<[^>]+>", "", query)
     # Remove null bytes
@@ -282,6 +324,30 @@ def mask_pii(text: str) -> str:
     # Credit card numbers (13-19 digits with optional separators)
     text = re.sub(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{1,7}\b", "[CC_REDACTED]", text)
     return text
+
+
+# ── Phase 4: Repeated-query abuse detection ──────────────────────────────────
+_user_recent_queries: dict[str, list[tuple[str, float]]] = defaultdict(list)
+_DEDUP_WINDOW = 30  # seconds — identical queries within this window are flagged
+_DEDUP_MAX_REPEATS = 3  # flag after this many identical queries in the window
+
+
+def check_repeated_query(user_id: str, query_hash: str) -> bool:
+    """Return True if user is sending the same query repeatedly (abuse/bot pattern).
+
+    Does NOT block — callers decide whether to reject or just log.
+    """
+    from collections import defaultdict as _dd
+    now = time.time()
+    recent = _user_recent_queries[user_id]
+    # Prune old entries
+    _user_recent_queries[user_id] = [(h, t) for h, t in recent if now - t < _DEDUP_WINDOW]
+    _user_recent_queries[user_id].append((query_hash, now))
+    count = sum(1 for h, _ in _user_recent_queries[user_id] if h == query_hash)
+    if count >= _DEDUP_MAX_REPEATS:
+        logger.warning("repeated_query_detected", user_id=user_id, repeat_count=count)
+        return True
+    return False
 
 
 def log_security_event(event_type: str, details: Optional[dict] = None, user_id: str = "",

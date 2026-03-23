@@ -13,7 +13,7 @@ from backend.app.models.document_models import SearchResult
 from backend.app.models.session_models import ConversationTurn
 
 # Chunks below this score are likely irrelevant noise
-MIN_RELEVANCE_SCORE = 0.20
+MIN_RELEVANCE_SCORE = 0.35
 
 
 class ContextBuilder:

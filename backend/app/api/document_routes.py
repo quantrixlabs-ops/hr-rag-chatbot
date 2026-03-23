@@ -22,7 +22,7 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
 def _remove_document_chunks(document_id: str, s=None) -> int:
@@ -71,7 +71,7 @@ def _remove_document_chunks(document_id: str, s=None) -> int:
     return removed
 
 # Upload rate limiting: 5 uploads per minute per user
-_upload_rate: dict[str, list[float]] = defaultdict(list)
+_upload_rate: defaultdict = defaultdict(list)
 UPLOAD_RATE_LIMIT = 5
 UPLOAD_RATE_WINDOW = 60
 
@@ -86,7 +86,15 @@ async def upload(
     version: str = Form("1.0"),
     user: User = Depends(get_current_user),
 ):
-    require_role(user, "hr_admin")
+    # Phase C: HR Team can upload (pending approval); HR Head+ uploads are auto-approved
+    _HR_UPLOAD_ROLES = {"hr_team", "hr_head", "hr_admin", "admin", "super_admin"}
+    if user.role not in _HR_UPLOAD_ROLES:
+        require_role(user, "hr_admin")  # Fallback — blocks non-HR roles
+
+    # Per-tenant upload & document count quota enforcement
+    from backend.app.core.tenant import TenantQuotaEnforcer
+    TenantQuotaEnforcer.check_upload_quota()
+    TenantQuotaEnforcer.check_document_count_quota()
 
     # Upload rate limiting: 5 per minute per user
     now = time.time()
@@ -120,41 +128,33 @@ async def upload(
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(400, f"File exceeds maximum size of {MAX_UPLOAD_SIZE // (1024*1024)} MB")
 
-    # Check for duplicate documents — with version-aware upgrade support
+    # Check for duplicate documents — auto-replace if same content or filename
     import hashlib
     content_hash = hashlib.sha256(content).hexdigest()
     s = get_settings()
+    tenant_id = getattr(user, "tenant_id", "default") or "default"
     old_doc_id_to_replace = None
     with sqlite3.connect(s.db_path) as con:
-        # Check by content hash first — identical content is always a duplicate
+        # Check by content hash — identical content replaces existing
         hash_match = con.execute(
-            "SELECT document_id, title FROM documents WHERE content_hash=?",
-            (content_hash,)
+            "SELECT document_id, title FROM documents WHERE content_hash=? AND tenant_id=?",
+            (content_hash, tenant_id)
         ).fetchone()
         if hash_match:
-            raise HTTPException(
-                409,
-                f"Identical content already exists (ID: {hash_match[0]}, Title: {hash_match[1]})."
-            )
-        # Check by filename — same file may be a version upgrade
-        fname_match = con.execute(
-            "SELECT document_id, title, version FROM documents WHERE source_filename=?",
-            (filename,)
-        ).fetchone()
-        if fname_match:
-            old_version = fname_match[2] or "1.0"
-            if version > old_version:
-                # Version upgrade — mark old document for replacement
+            old_doc_id_to_replace = hash_match[0]
+            logger.info("duplicate_content_replace", old_id=old_doc_id_to_replace,
+                        old_title=hash_match[1], filename=filename)
+        else:
+            # Check by filename — same filename replaces existing
+            fname_match = con.execute(
+                "SELECT document_id, title, version FROM documents WHERE source_filename=? AND tenant_id=?",
+                (filename, tenant_id)
+            ).fetchone()
+            if fname_match:
                 old_doc_id_to_replace = fname_match[0]
-                logger.info("version_upgrade", old_id=old_doc_id_to_replace,
-                            old_version=old_version, new_version=version, filename=filename)
-            else:
-                raise HTTPException(
-                    409,
-                    f"Same or older version already exists (ID: {fname_match[0]}, "
-                    f"Title: {fname_match[1]}, Version: {old_version}). "
-                    f"Upload with a higher version number to replace it."
-                )
+                logger.info("same_filename_replace", old_id=old_doc_id_to_replace,
+                            old_title=fname_match[1], old_version=fname_match[2],
+                            new_version=version, filename=filename)
 
     # Sanitize title to prevent stored XSS
     import html as html_mod
@@ -182,7 +182,8 @@ async def upload(
         raise HTTPException(
             400,
             f"Document '{filename}' was rejected. "
-            "It may be a test document, exceed the maximum chunk limit (500), or be too large."
+            "It may be a test document (filename matches test patterns), "
+            f"exceed the maximum chunk limit ({2000}), or be larger than 100 MB."
         )
     if result.status != "indexed":
         raise HTTPException(
@@ -191,9 +192,49 @@ async def upload(
             "The file could not be processed — it may be empty, corrupted, or a scanned PDF."
         )
     log_document_upload(user, result.document_id, category, filename)
+
+    # Phase C: Document approval workflow
+    # HR Head/Admin uploads are auto-approved; HR Team uploads require approval
+    _AUTO_APPROVE_ROLES = {"hr_head", "hr_admin", "admin", "super_admin"}
+    if user.role in _AUTO_APPROVE_ROLES:
+        approval_status = "approved"
+        approved_by = user.user_id
+        approved_at = time.time()
+    else:
+        approval_status = "pending"
+        approved_by = ""
+        approved_at = None
+
+    with sqlite3.connect(s.db_path) as con:
+        if approved_at:
+            con.execute(
+                "UPDATE documents SET approval_status=?, approved_by=?, approved_at=? WHERE document_id=?",
+                (approval_status, approved_by, approved_at, result.document_id),
+            )
+        else:
+            con.execute(
+                "UPDATE documents SET approval_status=?, approved_by=? WHERE document_id=?",
+                (approval_status, approved_by, result.document_id),
+            )
+
+    # Phase D: Notify HR Head when document needs approval
+    if approval_status == "pending":
+        try:
+            from backend.app.api.notification_routes import notify_role
+            notify_role("hr_head", f"Document pending approval: {title[:80]}",
+                        "A new document was uploaded and requires your approval.",
+                        "action", f"/documents/{result.document_id}", s.db_path)
+        except Exception:
+            pass
+
     resp = DocumentUploadResponse(document_id=result.document_id, chunk_count=result.chunk_count, status=result.status, processing_time_ms=result.processing_time_ms)
     if old_doc_id_to_replace:
         logger.info("version_replaced", old_id=old_doc_id_to_replace, new_id=result.document_id, version=version)
+
+    # Invalidate cached answers that cited this document (content may have changed)
+    from backend.app.core.semantic_cache import invalidate_on_document_change
+    invalidate_on_document_change(filename)
+
     return resp
 
 
@@ -289,14 +330,146 @@ async def get_document_content(document_id: str, user: User = Depends(get_curren
 @router.get("")
 async def list_docs(user: User = Depends(get_current_user)):
     s = get_settings()
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
+    _HR_ROLES = {"hr_team", "hr_head", "hr_admin", "admin", "super_admin"}
     with sqlite3.connect(s.db_path) as con:
-        rows = con.execute("SELECT document_id,title,category,access_roles,chunk_count,uploaded_at,version FROM documents ORDER BY uploaded_at DESC").fetchall()
+        rows = con.execute(
+            "SELECT document_id,title,category,access_roles,chunk_count,uploaded_at,version,"
+            "COALESCE(approval_status,'approved'),COALESCE(approved_by,''),uploaded_by "
+            "FROM documents WHERE tenant_id=? ORDER BY uploaded_at DESC",
+            (tenant_id,),
+        ).fetchall()
     docs = []
     for r in rows:
         roles = json.loads(r[3])
+        approval = r[7]
+        # Phase C: Non-HR users only see approved documents
+        if user.role not in _HR_ROLES and approval != "approved":
+            continue
         if can_access_document(user.role, roles):
-            docs.append({"document_id": r[0], "title": r[1], "category": r[2], "access_roles": roles, "chunk_count": r[4], "uploaded_at": r[5], "version": r[6]})
+            docs.append({
+                "document_id": r[0], "title": r[1], "category": r[2],
+                "access_roles": roles, "chunk_count": r[4], "uploaded_at": r[5],
+                "version": r[6], "approval_status": approval,
+                "approved_by": r[8], "uploaded_by": r[9],
+            })
     return {"documents": docs, "count": len(docs)}
+
+
+# ── Phase C: Document Approval Workflow ───────────────────────────────────────
+
+class DocumentApprovalRequest(BaseModel):
+    action: str  # "approve" or "reject"
+    comment: str = ""
+
+
+@router.get("/pending")
+async def list_pending_documents(user: User = Depends(get_current_user)):
+    """List documents awaiting approval — HR Head+ only."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            "SELECT d.document_id, d.title, d.category, d.chunk_count, d.uploaded_at, "
+            "d.version, d.source_filename, d.uploaded_by, "
+            "COALESCE(u.full_name, u.username, d.uploaded_by) "
+            "FROM documents d LEFT JOIN users u ON d.uploaded_by = u.user_id "
+            "WHERE d.approval_status='pending' AND d.tenant_id=? "
+            "ORDER BY d.uploaded_at ASC",
+            (tenant_id,),
+        ).fetchall()
+    return {
+        "pending": [
+            {
+                "document_id": r[0], "title": r[1], "category": r[2],
+                "chunk_count": r[3], "uploaded_at": r[4], "version": r[5],
+                "source_filename": r[6], "uploaded_by": r[7],
+                "uploaded_by_name": r[8],
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
+@router.post("/{document_id}/approve")
+async def approve_or_reject_document(
+    document_id: str, req: DocumentApprovalRequest, user: User = Depends(get_current_user),
+):
+    """Approve or reject a pending document — HR Head+ only.
+
+    Approved documents become visible to all users with matching access roles.
+    Rejected documents are removed from the index and deleted.
+    """
+    require_role(user, "hr_admin")
+    if req.action not in ("approve", "reject"):
+        raise HTTPException(400, "Action must be 'approve' or 'reject'")
+
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT title, approval_status, uploaded_by FROM documents WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Document not found")
+        if row[1] != "pending":
+            raise HTTPException(409, f"Document is already {row[1]}")
+
+        if req.action == "approve":
+            now = time.time()
+            con.execute(
+                "UPDATE documents SET approval_status='approved', approved_by=?, approved_at=? "
+                "WHERE document_id=?",
+                (user.user_id, now, document_id),
+            )
+            from backend.app.core.security import log_security_event
+            log_security_event("document_approved", {
+                "document_id": document_id, "title": row[0],
+                "uploaded_by": row[2], "comment": req.comment,
+            }, user_id=user.user_id)
+            # Phase D: Notify uploader
+            try:
+                from backend.app.api.notification_routes import create_notification
+                if row[2]:  # uploaded_by
+                    create_notification(
+                        row[2], f"Document approved: {row[0][:80]}",
+                        "Your uploaded document has been approved and is now searchable.",
+                        "success", f"/documents/{document_id}",
+                    )
+            except Exception:
+                pass
+            return {"status": "approved", "document_id": document_id, "title": row[0]}
+        else:
+            # Reject — remove from index and mark as rejected
+            from backend.app.core.security import log_security_event
+            con.execute(
+                "UPDATE documents SET approval_status='rejected', approved_by=?, approved_at=? "
+                "WHERE document_id=?",
+                (user.user_id, time.time(), document_id),
+            )
+            # Remove chunks from search index so rejected docs aren't searchable
+            removed = _remove_document_chunks(document_id, s)
+            log_security_event("document_rejected", {
+                "document_id": document_id, "title": row[0],
+                "uploaded_by": row[2], "comment": req.comment,
+                "chunks_removed": removed,
+            }, user_id=user.user_id)
+            # Phase D: Notify uploader
+            try:
+                from backend.app.api.notification_routes import create_notification
+                if row[2]:  # uploaded_by
+                    create_notification(
+                        row[2], f"Document rejected: {row[0][:80]}",
+                        f"Reason: {req.comment or 'No reason given'}",
+                        "warning", f"/documents/{document_id}",
+                    )
+            except Exception:
+                pass
+            return {"status": "rejected", "document_id": document_id, "title": row[0]}
 
 
 @router.delete("/{document_id}")
@@ -308,6 +481,11 @@ async def delete_doc(document_id: str, user: User = Depends(get_current_user)):
     if not row:
         raise HTTPException(404, f"Document {document_id} not found")
     removed = _remove_document_chunks(document_id, s)
+
+    # Invalidate cached answers that cited the deleted document
+    from backend.app.core.semantic_cache import invalidate_on_document_change
+    invalidate_on_document_change(row[0])
+
     return {"status": "deleted", "document_id": document_id, "chunks_removed": removed}
 
 
@@ -333,7 +511,7 @@ async def batch_delete(req: BatchDeleteRequest, user: User = Depends(get_current
     ids_to_delete = set(req.document_ids)
 
     # Verify all documents exist and collect filenames
-    filenames: dict[str, str] = {}
+    filenames = {}  # type: dict
     with sqlite3.connect(s.db_path) as con:
         for doc_id in ids_to_delete:
             row = con.execute("SELECT title, source_filename FROM documents WHERE document_id=?", (doc_id,)).fetchone()
@@ -385,6 +563,11 @@ async def batch_delete(req: BatchDeleteRequest, user: User = Depends(get_current
         upload_path = os.path.join(s.upload_dir, fname)
         if os.path.exists(upload_path):
             os.remove(upload_path)
+
+    # Invalidate cached answers that cited any of the deleted documents
+    from backend.app.core.semantic_cache import invalidate_on_document_change
+    for fname in filenames.values():
+        invalidate_on_document_change(fname)
 
     return {
         "status": "deleted",
@@ -481,3 +664,255 @@ async def reindex(req: ReindexRequest, user: User = Depends(get_current_user)):
         vs.save()
         logger.info("full_reindex_complete", reindexed=len(results), errors=len(errors), total_chunks=vs.total_chunks)
         return {"status": "complete", "reindexed": len(results), "errors": errors, "total_chunks": vs.total_chunks}
+
+
+# ── Phase 2: Async upload (Celery-backed) ────────────────────────────────────
+
+@router.post("/upload-async", status_code=202)
+async def upload_async(
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    category: str = Form("policy"),
+    access_roles: str = Form('["employee","manager","hr_admin"]'),
+    version: str = Form("1.0"),
+    user: User = Depends(get_current_user),
+):
+    """Async document upload — returns 202 + job_id immediately.
+
+    File is saved to disk, Celery worker handles ingestion in the background.
+    Poll GET /documents/jobs/{job_id} for status.
+    """
+    require_role(user, "hr_admin")
+    from backend.app.core.permissions import require_permission
+    if not require_permission(user.role, "documents.upload"):
+        raise HTTPException(403, "Insufficient permissions to upload documents")
+
+    s = get_settings()
+
+    # Rate limit
+    now = time.time()
+    _upload_rate[user.user_id] = [t for t in _upload_rate[user.user_id] if now - t < UPLOAD_RATE_WINDOW]
+    if len(_upload_rate[user.user_id]) >= UPLOAD_RATE_LIMIT:
+        raise HTTPException(429, "Upload rate limit exceeded. Try again in a minute.")
+    _upload_rate[user.user_id].append(now)
+
+    # Validate filename
+    raw_filename = file.filename or "unknown"
+    filename = os.path.basename(raw_filename)
+    if not filename or filename.startswith(".") or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(400, f"Unsupported type '{ext}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(400, "Uploaded file is empty")
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(400, f"File exceeds {MAX_UPLOAD_SIZE // (1024*1024)} MB limit")
+
+    import hashlib, uuid as _uuid, html as html_mod
+    content_hash = hashlib.sha256(content).hexdigest()
+    title = html_mod.escape(title.strip(), quote=True)
+    if not title:
+        raise HTTPException(400, "Document title cannot be empty")
+
+    # Auto-replace duplicate (tenant-scoped)
+    tenant_id = getattr(user, "tenant_id", "default") or "default"
+    with sqlite3.connect(s.db_path) as con:
+        dup = con.execute("SELECT document_id FROM documents WHERE content_hash=? AND tenant_id=?", (content_hash, tenant_id)).fetchone()
+        if dup:
+            _remove_document_chunks(dup[0], s)
+            logger.info("async_duplicate_replaced", old_id=dup[0])
+
+    # Save file to disk (worker reads it from here)
+    document_id = str(_uuid.uuid4())
+    safe_filename = f"{document_id}_{filename}"
+    file_path = os.path.join(s.upload_dir, safe_filename)
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Register document in SQLite as pending
+    roles = json.loads(access_roles)
+    now_ts = time.time()
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "INSERT INTO documents (document_id,title,category,access_roles,source_filename,"
+            "uploaded_by,uploaded_at,chunk_count,content_hash,ingestion_status) "
+            "VALUES (?,?,?,?,?,?,?,0,?,'pending')",
+            (document_id, title, category, json.dumps(roles), safe_filename, user.user_id, now_ts, content_hash),
+        )
+
+    # Enqueue Celery ingestion task
+    try:
+        from backend.app.workers.ingestion_tasks import ingest_document as _ingest_task
+        job = _ingest_task.delay(
+            document_id=document_id,
+            file_path=file_path,
+            filename=filename,
+            category=category,
+            access_roles=roles,
+            tenant_id="default",
+        )
+        job_id = job.id
+    except Exception as e:
+        logger.error("celery_enqueue_failed", error=str(e), doc_id=document_id)
+        # Fallback: mark as failed so admin can retry
+        with sqlite3.connect(s.db_path) as con:
+            con.execute("UPDATE documents SET ingestion_status='failed' WHERE document_id=?", (document_id,))
+        raise HTTPException(503, "Task queue unavailable. Document saved but not ingested. Use retry endpoint.")
+
+    # Audit log
+    from backend.app.database.postgres import write_audit_log
+    write_audit_log(
+        action="document.upload_async",
+        target_type="document",
+        target_id=document_id,
+        extra={"filename": filename, "category": category, "job_id": job_id},
+    )
+
+    logger.info("document_upload_async_queued", doc_id=document_id, job_id=job_id, filename=filename)
+    return {
+        "status": "pending",
+        "document_id": document_id,
+        "job_id": job_id,
+        "message": f"Document '{filename}' queued for ingestion. Poll /documents/jobs/{job_id} for status.",
+    }
+
+
+# ── Phase 2: Job status polling ───────────────────────────────────────────────
+
+@router.get("/jobs/{job_id}")
+async def get_job_status(job_id: str, user: User = Depends(get_current_user)):
+    """Poll the status of an async ingestion job."""
+    require_role(user, "hr_admin")
+    try:
+        from backend.app.workers.celery_app import app as celery_app
+        result = celery_app.AsyncResult(job_id)
+        state = result.state
+        info = result.info or {}
+
+        if state == "SUCCESS":
+            return {"job_id": job_id, "status": "done", "result": info}
+        elif state == "FAILURE":
+            return {"job_id": job_id, "status": "failed", "error": str(info)}
+        elif state == "STARTED":
+            return {"job_id": job_id, "status": "processing"}
+        else:
+            return {"job_id": job_id, "status": "pending"}
+    except Exception as e:
+        raise HTTPException(503, f"Task queue unavailable: {e}")
+
+
+# ── Phase 2: Retry failed document ingestion ──────────────────────────────────
+
+@router.post("/{document_id}/retry")
+async def retry_ingestion(document_id: str, user: User = Depends(get_current_user)):
+    """Retry ingestion for a document that failed or is stuck in pending."""
+    require_role(user, "hr_admin")
+    s = get_settings()
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT source_filename, title, category, access_roles, ingestion_status "
+            "FROM documents WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(404, f"Document {document_id} not found")
+
+    filename, title, category, access_roles_json, current_status = row
+
+    if current_status == "processing":
+        raise HTTPException(409, "Document is currently being processed. Wait for it to complete or fail.")
+    if current_status == "done":
+        raise HTTPException(409, "Document is already successfully ingested. Use reindex if needed.")
+
+    file_path = os.path.join(s.upload_dir, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(404, f"Source file not found on disk: {filename}. Re-upload required.")
+
+    roles = json.loads(access_roles_json)
+
+    # Reset status to pending
+    with sqlite3.connect(s.db_path) as con:
+        con.execute("UPDATE documents SET ingestion_status='pending' WHERE document_id=?", (document_id,))
+
+    try:
+        from backend.app.workers.ingestion_tasks import ingest_document as _ingest_task
+        job = _ingest_task.delay(
+            document_id=document_id,
+            file_path=file_path,
+            filename=os.path.basename(filename).split("_", 1)[-1],  # strip UUID prefix
+            category=category,
+            access_roles=roles,
+            tenant_id="default",
+        )
+        job_id = job.id
+    except Exception as e:
+        raise HTTPException(503, f"Task queue unavailable: {e}")
+
+    logger.info("document_retry_queued", doc_id=document_id, job_id=job_id)
+    return {"status": "pending", "document_id": document_id, "job_id": job_id}
+
+
+# ── Phase 2: Document version history ────────────────────────────────────────
+
+@router.get("/{document_id}/versions")
+async def get_document_versions(document_id: str, user: User = Depends(get_current_user)):
+    """View version history for a document (requires hr_admin)."""
+    require_role(user, "hr_admin")
+
+    from backend.app.core.permissions import require_permission
+    if not require_permission(user.role, "documents.view_versions"):
+        raise HTTPException(403, "Insufficient permissions")
+
+    s = get_settings()
+
+    # Check document exists
+    with sqlite3.connect(s.db_path) as con:
+        doc = con.execute(
+            "SELECT title, category, version, ingestion_status FROM documents WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+
+    if not doc:
+        raise HTTPException(404, f"Document {document_id} not found")
+
+    # Fetch versions from PostgreSQL if available
+    versions = []
+    if s.database_url.startswith("postgresql"):
+        try:
+            from backend.app.database.postgres import get_connection
+            from sqlalchemy import text
+            with get_connection() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT id, version_number, is_current, archived_at, created_at "
+                        "FROM document_versions WHERE document_id = :doc_id ORDER BY version_number DESC"
+                    ),
+                    {"doc_id": document_id},
+                ).fetchall()
+                versions = [
+                    {
+                        "version_id": str(r[0]),
+                        "version_number": r[1],
+                        "is_current": r[2],
+                        "archived_at": str(r[3]) if r[3] else None,
+                        "created_at": str(r[4]),
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.warning("version_history_pg_failed", error=str(e))
+
+    return {
+        "document_id": document_id,
+        "title": doc[0],
+        "category": doc[1],
+        "current_version": doc[2],
+        "ingestion_status": doc[3],
+        "version_history": versions,
+    }

@@ -30,22 +30,26 @@ from backend.app.services.embedding_service import EmbeddingService
 logger = structlog.get_logger()
 
 # ── Chunking parameters ──────────────────────────────────────────────────────
-HR_CHUNK_RULES: dict[str, dict] = {
+HR_CHUNK_RULES = {  # type: dict
     "policy": {"size": 400, "overlap": 60},
     "handbook": {"size": 400, "overlap": 60},
-    "benefits": {"size": 400, "overlap": 60},
-    "leave": {"size": 400, "overlap": 60},
+    "benefits": {"size": 350, "overlap": 50},
+    "leave": {"size": 350, "overlap": 50},
     "onboarding": {"size": 400, "overlap": 60},
-    "legal": {"size": 400, "overlap": 60},
+    "legal": {"size": 500, "overlap": 80},
 }
 MIN_CHUNK_WORDS = 30   # lowered — short policy paragraphs are valid
 MAX_CHUNK_WORDS = 800
-MAX_CHUNKS_PER_DOCUMENT = 500  # Hard limit — reject documents that produce more chunks
-MAX_DOCUMENT_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_CHUNKS_PER_DOCUMENT = 2000  # Hard limit — reject documents that produce more chunks
+MAX_DOCUMENT_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
 
-# Reject documents whose title/filename matches test/QA patterns
+# Sentence boundary pattern for smarter splitting
+_SENTENCE_END = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+
+# Reject documents whose FILENAME matches obvious test/QA patterns
+# Only check filenames, not titles — users may legitimately title docs with "test" in the name
 _TEST_DOC_PATTERNS = re.compile(
-    r"(^test[_\s]|_test$|^qa[_\s]|_qa$|^dummy|^sample[_\s]|^fake|^mock|huge\s*file\s*qa)",
+    r"(^test_|_test\.|^qa_|_qa\.|^dummy[_.]|^fake[_.]|^mock[_.]|huge\s*file\s*qa)",
     re.IGNORECASE,
 )
 
@@ -56,22 +60,115 @@ HEADING_RE = re.compile(
 
 
 # ── Chunking ─────────────────────────────────────────────────────────────────
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, respecting common abbreviations."""
+    # Split on sentence boundaries (period/exclamation/question followed by space + capital)
+    parts = _SENTENCE_END.split(text)
+    sentences: list[str] = []
+    for part in parts:
+        stripped = part.strip()
+        if stripped:
+            sentences.append(stripped)
+    # If no sentence breaks found, fallback to splitting on double newlines then single
+    if len(sentences) <= 1 and text.strip():
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if len(paragraphs) > 1:
+            return paragraphs
+    return sentences if sentences else [text.strip()]
+
+
 def _fixed_chunk(text: str, size: int = 400, overlap: int = 60) -> list[str]:
-    """Split text into overlapping word-count windows."""
-    words = text.split()
-    if not words:
+    """Split text into overlapping windows, preferring sentence boundaries.
+
+    Improved: tries to break at sentence ends rather than mid-word to produce
+    more coherent chunks for better retrieval quality.
+    """
+    sentences = _split_sentences(text)
+    if not sentences:
         return []
+
+    # If the text is small enough for a single chunk, return it
+    total_words = len(text.split())
+    if total_words <= size:
+        if total_words >= MIN_CHUNK_WORDS:
+            return [text.strip()]
+        return []
+
     chunks: list[str] = []
-    start = 0
-    while start < len(words):
-        end = min(start + size, len(words))
-        chunk = " ".join(words[start:end])
-        if len(chunk.split()) >= MIN_CHUNK_WORDS:
-            chunks.append(chunk)
-        start += size - overlap
-        if start >= len(words):
-            break
+    current_sentences: list[str] = []
+    current_word_count = 0
+    overlap_buffer: list[str] = []  # Sentences to carry into next chunk
+
+    for sent in sentences:
+        sent_words = len(sent.split())
+
+        if current_word_count + sent_words > size and current_sentences:
+            # Finish current chunk
+            chunk_text = " ".join(current_sentences)
+            if len(chunk_text.split()) >= MIN_CHUNK_WORDS:
+                chunks.append(chunk_text)
+
+            # Build overlap from end of current chunk
+            overlap_buffer = []
+            overlap_words = 0
+            for s in reversed(current_sentences):
+                s_words = len(s.split())
+                if overlap_words + s_words > overlap:
+                    break
+                overlap_buffer.insert(0, s)
+                overlap_words += s_words
+
+            current_sentences = list(overlap_buffer)
+            current_word_count = sum(len(s.split()) for s in current_sentences)
+
+        current_sentences.append(sent)
+        current_word_count += sent_words
+
+    # Final chunk
+    if current_sentences:
+        chunk_text = " ".join(current_sentences)
+        if len(chunk_text.split()) >= MIN_CHUNK_WORDS:
+            chunks.append(chunk_text)
+
     return chunks
+
+
+def score_chunk_quality(text: str, heading: str = "") -> float:
+    """Score a chunk's quality for retrieval (0.0-1.0).
+
+    Higher scores indicate chunks more likely to be useful for answering questions.
+    Used for logging/monitoring — not for filtering (all valid chunks are kept).
+    """
+    words = text.split()
+    word_count = len(words)
+    score = 0.5  # Base score
+
+    # Length: prefer 100-400 words (the sweet spot for retrieval)
+    if 100 <= word_count <= 400:
+        score += 0.15
+    elif 50 <= word_count < 100 or 400 < word_count <= 600:
+        score += 0.05
+
+    # Has heading context — better for topical retrieval
+    if heading:
+        score += 0.1
+
+    # Contains structured content (bullets, numbers) — often factual/policy
+    bullet_count = text.count("•") + text.count("-") + text.count("*")
+    numbered_count = len(re.findall(r'^\d+[.)]\s', text, re.MULTILINE))
+    if bullet_count >= 2 or numbered_count >= 2:
+        score += 0.1
+
+    # Contains complete sentences (ends with period) — more coherent
+    if text.rstrip().endswith(('.', '!', '?')):
+        score += 0.05
+
+    # Penalize chunks that are mostly whitespace or very repetitive
+    unique_words = len(set(w.lower() for w in words))
+    if unique_words / max(word_count, 1) < 0.3:
+        score -= 0.2  # Very repetitive text
+
+    return max(0.0, min(1.0, score))
 
 
 def _heading_chunk(text: str, size: int = 400, overlap: int = 60) -> list[tuple[str, str]]:
@@ -115,11 +212,14 @@ def chunk_document(
     rules = HR_CHUNK_RULES.get(meta.category, {"size": 400, "overlap": 60})
     raw = _heading_chunk(text, rules["size"], rules["overlap"])
     chunks: list[ChunkMetadata] = []
+    quality_scores: list[float] = []
     for i, (txt, hd) in enumerate(raw):
         tc = len(txt.split())
         if tc < MIN_CHUNK_WORDS:
             continue
         cid = str(uuid.uuid4())
+        quality = score_chunk_quality(txt, hd)
+        quality_scores.append(quality)
         chunks.append(ChunkMetadata(
             chunk_id=cid,
             document_id=meta.document_id,
@@ -133,6 +233,11 @@ def chunk_document(
             source=meta.title,
             embedding_id=cid,
         ))
+    if quality_scores:
+        avg_quality = sum(quality_scores) / len(quality_scores)
+        if avg_quality < 0.4:
+            logger.warning("low_chunk_quality", source=meta.title, page=page_number,
+                           avg_quality=round(avg_quality, 2), chunks=len(chunks))
     return chunks
 
 
@@ -264,7 +369,7 @@ class IngestionPipeline:
 
         # ── Pre-flight validation ────────────────────────────────────────
         # Reject test/QA documents that could contaminate the vector store
-        if _TEST_DOC_PATTERNS.search(title) or _TEST_DOC_PATTERNS.search(filename):
+        if _TEST_DOC_PATTERNS.search(filename):
             logger.warning("ingestion_rejected_test_doc", filename=filename, title=title)
             return IngestionResult(doc_id, 0, "rejected", 0.0)
 
@@ -339,7 +444,7 @@ class IngestionPipeline:
                              chunks=len(chunks), limit=MAX_CHUNKS_PER_DOCUMENT,
                              hint="Document is too large and would dominate retrieval")
                 return IngestionResult(doc_id, 0, "rejected", (time.time() - t0) * 1000)
-            elif len(chunks) > 300:
+            elif len(chunks) > 500:
                 logger.warning("ingestion_high_chunk_count", filename=filename,
                                chunks=len(chunks), hint="Very many chunks — consider larger chunk size")
 
@@ -353,12 +458,19 @@ class IngestionPipeline:
                         embedding_dim=embeddings.shape[1],
                         embed_latency_ms=round(embed_ms))
 
-            # 7. Index into FAISS
-            self.vs.add(embeddings, chunks)
+            # 7. Index into vector store (Qdrant or FAISS)
+            # QdrantStore.add() accepts tenant_id; FAISSIndex.add() ignores extra kwargs
+            from backend.app.vectorstore.qdrant_store import DEFAULT_TENANT_ID as _DEFAULT_TENANT
+            tenant_id = getattr(self, "tenant_id", _DEFAULT_TENANT)
+            if hasattr(self.vs, "tenant_id") or "qdrant" in type(self.vs).__name__.lower():
+                self.vs.add(embeddings, chunks, tenant_id=tenant_id)
+            else:
+                self.vs.add(embeddings, chunks)
             logger.info("ingestion_step", step="7_indexed", filename=filename,
                         new_chunks=len(chunks),
                         embeddings_stored=embeddings.shape[0],
-                        total_in_faiss=self.vs.total_chunks)
+                        total_chunks=self.vs.total_chunks,
+                        vector_backend=type(self.vs).__name__)
 
             # 8. Update BM25
             if self.bm25:
@@ -394,12 +506,15 @@ class IngestionPipeline:
             return IngestionResult(doc_id, 0, "failed", ms)
 
     def _register(self, m: DocumentMetadata, content_hash: str = "") -> None:
+        from backend.app.core.tenant import get_current_tenant
+        tenant_id = get_current_tenant()
         with sqlite3.connect(get_settings().db_path) as con:
             con.execute(
                 "INSERT OR REPLACE INTO documents (document_id,title,category,access_roles,"
-                "effective_date,version,source_filename,uploaded_by,uploaded_at,page_count,chunk_count,content_hash) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "effective_date,version,source_filename,uploaded_by,uploaded_at,page_count,"
+                "chunk_count,content_hash,tenant_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (m.document_id, m.title, m.category, json.dumps(m.access_roles),
                  m.effective_date, m.version, m.source_filename, m.uploaded_by,
-                 m.uploaded_at, m.page_count, m.chunk_count, content_hash),
+                 m.uploaded_at, m.page_count, m.chunk_count, content_hash, tenant_id),
             )

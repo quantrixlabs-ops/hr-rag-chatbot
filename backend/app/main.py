@@ -43,9 +43,9 @@ logger = structlog.get_logger()
 
 
 # ── Ollama connectivity check ────────────────────────────────────────────────
-def _check_ollama(base_url: str) -> dict[str, str]:
+def _check_ollama(base_url: str) -> dict:
     """Validate Ollama is reachable and required models are pulled."""
-    status: dict[str, str] = {}
+    status = {}  # type: dict
     try:
         resp = httpx.get(f"{base_url}/api/tags", timeout=5.0)
         resp.raise_for_status()
@@ -68,6 +68,30 @@ def _ensure_dirs(s) -> None:
 
 
 # ── Service wiring ───────────────────────────────────────────────────────────
+def _build_vector_store(s):
+    """Select and initialize vector store based on VECTOR_STORE_BACKEND config.
+
+    qdrant (default): self-hosted Qdrant — supports tenant_id filtering (Phase 3 ready)
+    faiss (fallback):  in-process FAISS — for local dev without Docker
+    """
+    if s.vector_store_backend == "qdrant":
+        try:
+            from backend.app.vectorstore.qdrant_store import QdrantStore
+            vs = QdrantStore(url=s.qdrant_url, collection=s.qdrant_collection, dimension=s.embedding_dimension)
+            vs.ensure_collection()
+            logger.info("vector_store_selected", backend="qdrant", url=s.qdrant_url)
+            return vs
+        except Exception as exc:
+            logger.warning("qdrant_init_failed", error=str(exc), fallback="faiss")
+            # Fall through to FAISS
+
+    from backend.app.vectorstore.faiss_store import FAISSIndex
+    vs = FAISSIndex(s.embedding_dimension, s.faiss_index_dir)
+    vs.load()
+    logger.info("vector_store_selected", backend="faiss", dir=s.faiss_index_dir)
+    return vs
+
+
 def _wire_services() -> dict:
     """Instantiate and wire all services — called once at startup."""
     s = get_settings()
@@ -76,13 +100,13 @@ def _wire_services() -> dict:
     emb = EmbeddingService(s.embedding_model, s.embedding_provider, s.ollama_base_url, s.embedding_dimension)
     emb.warmup()  # Pre-load embedding model at startup
 
-    from backend.app.vectorstore.faiss_store import FAISSIndex
-    vs = FAISSIndex(s.embedding_dimension, s.faiss_index_dir)
-    vs.load()  # safe — returns False if no index on disk
+    # Vector store — Qdrant (primary) or FAISS (fallback)
+    vs = _build_vector_store(s)
 
     from backend.app.services.retrieval_service import BM25Retriever, DenseRetriever, Reranker, RetrievalOrchestrator
     bm25 = BM25Retriever()
-    if vs.metadata:
+    # FAISS exposes .metadata; Qdrant does not pre-load all metadata in memory
+    if hasattr(vs, "metadata") and vs.metadata:
         bm25.build_index(vs.metadata)
     dense = DenseRetriever(emb, vs)
     reranker = Reranker()
@@ -128,6 +152,10 @@ async def lifespan(app: FastAPI):
     s = get_settings()
     logger.info("starting", env=s.environment)
 
+    # Phase 5: Initialize OpenTelemetry distributed tracing
+    from backend.app.core.tracing import init_tracing
+    init_tracing()
+
     # 1. Guarantee data dirs
     _ensure_dirs(s)
 
@@ -139,7 +167,27 @@ async def lifespan(app: FastAPI):
         logger.warning("ollama_offline", msg="LLM and embedding calls will fail until Ollama is started")
 
     # 3. Init DB + services
+    # Initialize SQLite (session store — always needed for session/user management)
     init_database(s.db_path)
+
+    # Seed default FAQ entries if table is empty
+    try:
+        from backend.app.services.faq_service import FAQService
+        seeded = FAQService(s.db_path).seed_defaults()
+        if seeded:
+            logger.info("faq_seeded", count=seeded)
+    except Exception as e:
+        logger.warning("faq_seed_failed", error=str(e))
+
+    # Initialize PostgreSQL schema if DATABASE_URL points to PostgreSQL
+    if s.database_url.startswith("postgresql"):
+        try:
+            from backend.app.database.postgres import init_postgres_schema
+            init_postgres_schema()
+            logger.info("postgres_initialized")
+        except Exception as e:
+            logger.warning("postgres_init_failed", error=str(e), fallback="sqlite_only")
+
     reg = _wire_services()
     set_registry(reg)
 
@@ -190,7 +238,10 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:3000",
             "http://localhost:3001",
+            "http://localhost:3002",
+            "http://localhost:3003",
             "http://localhost:5173",
+            "http://localhost:5174",
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -220,28 +271,32 @@ def create_app() -> FastAPI:
             response.headers["X-Frame-Options"] = "DENY"
             response.headers["X-XSS-Protection"] = "1; mode=block"
             response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-            response.headers["Content-Security-Policy"] = (
-                "default-src 'self'; "
-                "script-src 'self'; "
-                "style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; "
-                "connect-src 'self' http://localhost:8000; "
-                "frame-ancestors 'none'"
-            )
-            response.headers["server"] = "hr-chatbot"
+            # CSP only for production HTML pages — skip for API responses
+            # to avoid blocking frontend dev servers on different ports
             if s.environment == "production":
+                response.headers["Content-Security-Policy"] = (
+                    "default-src 'self'; "
+                    "script-src 'self'; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "img-src 'self' data:; "
+                    "connect-src 'self'; "
+                    "frame-ancestors 'none'"
+                )
                 response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            response.headers["server"] = "hr-chatbot"
             return response
 
-    # Global API rate limiting middleware — 60 requests/min per IP
-    _global_rate: dict[str, list[float]] = defaultdict(list)
-    GLOBAL_RATE_LIMIT = 60
+    # Global API rate limiting middleware — 300 requests/min per IP
+    # Frontend polls sessions + notifications every 10s = ~12 req/min baseline;
+    # plus normal clicks, uploads, chat — 300/min gives ample headroom.
+    _global_rate: defaultdict = defaultdict(list)
+    GLOBAL_RATE_LIMIT = 300
     GLOBAL_RATE_WINDOW = 60  # seconds
 
     class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            # Skip rate limiting for health checks
-            if request.url.path == "/health":
+            # Skip rate limiting for health checks and CORS preflight
+            if request.url.path == "/health" or request.method == "OPTIONS":
                 return await call_next(request)
             client_ip = request.client.host if request.client else "unknown"
             now = _time.time()
@@ -270,20 +325,86 @@ def create_app() -> FastAPI:
                     return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
             return await call_next(request)
 
+    # Phase 3: Tenant resolution middleware
+    # Runs after auth to resolve tenant_id from JWT claim or X-Tenant-Slug header.
+    # Sets ContextVar so all downstream services read the correct tenant automatically.
+    class TenantMiddleware(BaseHTTPMiddleware):
+        _SKIP_PATHS = {"/health", "/health/detailed", "/info", "/metrics",
+                       "/api/v1/tenants/me/branding", "/api/v1/tenants/register"}
+
+        async def dispatch(self, request, call_next):
+            if request.url.path in self._SKIP_PATHS:
+                return await call_next(request)
+
+            from backend.app.core.tenant import set_current_tenant, resolve_tenant_from_request
+            slug_header = request.headers.get("X-Tenant-Slug")
+            jwt_payload = None
+
+            # Try to peek at JWT without raising (auth middleware runs inside routes)
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                try:
+                    from backend.app.core.security import decode_token
+                    jwt_payload = decode_token(auth_header[7:])
+                except Exception:
+                    pass
+
+            tenant_id, config = resolve_tenant_from_request(jwt_payload, slug_header)
+            set_current_tenant(tenant_id, config)
+            return await call_next(request)
+
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(GlobalRateLimitMiddleware)
+    app.add_middleware(TenantMiddleware)
     app.add_middleware(RequestIdMiddleware)
     if _admin_allowed_ips:
         app.add_middleware(AdminIPAllowlistMiddleware)
 
-    # Routers
+    # Phase 3: All routes under /api/v1/ prefix
+    # Legacy paths (no prefix) kept for backward compatibility during migration.
     from backend.app.api import auth_routes, chat_routes, document_routes, admin_routes, user_routes, integration_routes
+    from backend.app.api import tenant_routes
+    # Phase 5: GDPR + compliance routes
+    from backend.app.api import gdpr_routes, compliance_routes
+    # Phase B: Ticket system
+    from backend.app.api import ticket_routes
+    # Phase D: Notifications + Complaints
+    from backend.app.api import notification_routes, complaint_routes
+    # Phase F: Branches + HR Contacts
+    from backend.app.api import branch_routes, hr_contact_routes
+    # FAQ management
+    from backend.app.api import faq_routes
+
+    API_V1 = "/api/v1"
+    app.include_router(auth_routes.router, prefix=API_V1)
+    app.include_router(chat_routes.router, prefix=API_V1)
+    app.include_router(document_routes.router, prefix=API_V1)
+    app.include_router(admin_routes.router, prefix=API_V1)
+    app.include_router(user_routes.router, prefix=API_V1)
+    app.include_router(integration_routes.router, prefix=API_V1)
+    app.include_router(tenant_routes.router, prefix=API_V1)
+    app.include_router(gdpr_routes.router, prefix=API_V1)
+    app.include_router(compliance_routes.router, prefix=API_V1)
+    app.include_router(ticket_routes.router, prefix=API_V1)
+    app.include_router(notification_routes.router, prefix=API_V1)
+    app.include_router(complaint_routes.router, prefix=API_V1)
+    app.include_router(branch_routes.router, prefix=API_V1)
+    app.include_router(hr_contact_routes.router, prefix=API_V1)
+    app.include_router(faq_routes.router, prefix=API_V1)
+
+    # Backward-compat: legacy routes (no /api/v1 prefix) — redirect to v1
     app.include_router(auth_routes.router)
     app.include_router(chat_routes.router)
     app.include_router(document_routes.router)
     app.include_router(admin_routes.router)
     app.include_router(user_routes.router)
     app.include_router(integration_routes.router)
+    app.include_router(ticket_routes.router)
+    app.include_router(notification_routes.router)
+    app.include_router(complaint_routes.router)
+    app.include_router(branch_routes.router)
+    app.include_router(hr_contact_routes.router)
+    app.include_router(faq_routes.router)
 
     # Prometheus metrics — secured behind admin auth
     from backend.app.core.security import get_current_user, require_role
@@ -304,14 +425,21 @@ def create_app() -> FastAPI:
     def health():
         s = get_settings()
         reg = get_registry()
+        ok_vs, ok_db = False, False
         try:
             vs = reg.get("vector_store")
-            ok_vs = vs and vs.total_chunks >= 0
-            with sqlite3.connect(s.db_path) as con:
-                con.execute("SELECT 1")
-            ok_db = True
+            ok_vs = vs is not None and vs.total_chunks >= 0
         except Exception:
             ok_vs = False
+        try:
+            if s.database_url.startswith("postgresql"):
+                from backend.app.database.postgres import check_postgres_health
+                ok_db = check_postgres_health().get("status") == "ok"
+            else:
+                with sqlite3.connect(s.db_path) as con:
+                    con.execute("SELECT 1")
+                ok_db = True
+        except Exception:
             ok_db = False
         overall = "ok" if ok_vs and ok_db else "degraded"
         return {"status": overall}
@@ -323,21 +451,43 @@ def create_app() -> FastAPI:
         s = get_settings()
         reg = get_registry()
         checks: dict[str, str] = {}
+
+        # Vector store
         vs = reg.get("vector_store")
-        checks["vector_store"] = f"ok ({vs.total_chunks} chunks)" if vs else "not_initialized"
+        if vs:
+            if hasattr(vs, "health"):
+                vh = vs.health()
+                checks["vector_store"] = f"ok ({vs.total_chunks} chunks)" if vh.get("status") == "ok" else f"error: {vh.get('detail')}"
+            else:
+                checks["vector_store"] = f"ok ({vs.total_chunks} chunks)"
+        else:
+            checks["vector_store"] = "not_initialized"
+
+        # LLM
         checks["llm_gateway"] = "configured" if reg.get("llm") else "not_initialized"
+
+        # Ollama
         ollama = _check_ollama(s.ollama_base_url)
         checks["ollama"] = ollama.get("ollama_connection", "unknown")
+
+        # Database
         try:
-            with sqlite3.connect(s.db_path) as con:
-                con.execute("SELECT 1")
-            checks["database"] = "ok"
+            if s.database_url.startswith("postgresql"):
+                from backend.app.database.postgres import check_postgres_health
+                pg = check_postgres_health()
+                checks["database"] = f"postgresql:{pg['status']}"
+            else:
+                with sqlite3.connect(s.db_path) as con:
+                    con.execute("SELECT 1")
+                checks["database"] = "sqlite:ok"
         except Exception as e:
             checks["database"] = f"error: {e}"
+
         overall = "operational" if all(
             "ok" in v or v == "configured" for v in checks.values()
         ) else "degraded"
-        metrics = {}
+
+        metrics: dict = {}
         try:
             metrics["vector_index_size"] = vs.total_chunks if vs else 0
             with sqlite3.connect(s.db_path) as con:
@@ -350,7 +500,34 @@ def create_app() -> FastAPI:
                 metrics["avg_query_latency_ms"] = round(avg_latency, 1) if avg_latency else 0
         except Exception:
             pass
-        return {"status": overall, "checks": checks, "metrics": metrics, "version": "1.0.0"}
+
+        return {
+            "status": overall,
+            "checks": checks,
+            "metrics": metrics,
+            "version": "1.0.0",
+            "vector_store_backend": s.vector_store_backend,
+            "database_backend": "postgresql" if s.database_url.startswith("postgresql") else "sqlite",
+        }
+
+    # Phase 5: Wire OpenTelemetry FastAPI auto-instrumentation
+    from backend.app.core.tracing import instrument_fastapi
+    instrument_fastapi(app)
+
+    # Phase 5: /health/ready — K8s readiness probe
+    # Returns 503 if key dependencies (DB, vector store) are not ready
+    @app.get("/health/ready")
+    def health_ready():
+        """Kubernetes readiness probe — returns 200 only when fully ready."""
+        reg = get_registry()
+        vs = reg.get("vector_store")
+        if vs is None:
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "reason": "vector_store_not_initialized"},
+            )
+        return {"status": "ready"}
 
     return app
 

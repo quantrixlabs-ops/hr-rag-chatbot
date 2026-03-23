@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getMetrics, getFailedQueries, getSecurityEvents } from '../services/api'
+import {
+  getMetrics, getFailedQueries, getSecurityEvents,
+  getUsers, getPendingUsers, approveUser, suspendUser,
+} from '../services/api'
 import type { AdminMetrics } from '../types/chat'
-import { BarChart3, FileText, AlertTriangle, Clock, Shield, ShieldAlert, XCircle, TrendingUp, Users, CheckCircle, ThumbsDown, RefreshCw } from 'lucide-react'
+import { BarChart3, FileText, AlertTriangle, Clock, Shield, ShieldAlert, XCircle, TrendingUp, Users, CheckCircle, ThumbsDown, RefreshCw, UserCheck, Ban } from 'lucide-react'
 
 interface Props {
   token: string
@@ -26,8 +29,11 @@ export default function AdminDashboard({ token }: Props) {
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null)
   const [failedQueries, setFailedQueries] = useState<any[]>([])
   const [securityEvents, setSecurityEvents] = useState<any[]>([])
-  const [tab, setTab] = useState<'overview' | 'failed' | 'security'>('overview')
+  const [users, setUsers] = useState<any[]>([])
+  const [pendingUsers, setPendingUsers] = useState<any[]>([])
+  const [tab, setTab] = useState<'overview' | 'failed' | 'security' | 'users'>('overview')
   const [refreshing, setRefreshing] = useState(false)
+  const [userFilter, setUserFilter] = useState('')
 
   const refreshData = useCallback(() => {
     setRefreshing(true)
@@ -35,6 +41,8 @@ export default function AdminDashboard({ token }: Props) {
       getMetrics(token).then(setMetrics).catch(() => {}),
       getFailedQueries(token).then(d => setFailedQueries(d.failed_queries || [])).catch(() => {}),
       getSecurityEvents(token).then(d => setSecurityEvents(d.events || [])).catch(() => {}),
+      getUsers(token).then(d => setUsers(d.users || [])).catch(() => {}),
+      getPendingUsers(token).then(d => setPendingUsers(d.pending_users || d.users || [])).catch(() => {}),
     ]).finally(() => setRefreshing(false))
   }, [token])
 
@@ -143,16 +151,143 @@ export default function AdminDashboard({ token }: Props) {
 
         {/* Tab Navigation */}
         <div className="flex gap-1 border-b border-gray-200">
-          {([['overview', 'Overview', BarChart3], ['failed', 'Failed Queries', XCircle], ['security', 'Security Events', ShieldAlert]] as const).map(([key, label, Icon]) => (
+          {([['overview', 'Overview', BarChart3], ['users', 'User Management', Users], ['failed', 'Failed Queries', XCircle], ['security', 'Security Events', ShieldAlert]] as const).map(([key, label, Icon]) => (
             <button key={key} onClick={() => setTab(key as any)}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${tab === key ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
               <Icon size={15} /> {label}
               {key === 'failed' && failedQueries.length > 0 && (
                 <span className="ml-1 px-1.5 py-0.5 text-xs bg-red-100 text-red-600 rounded-full">{failedQueries.length}</span>
               )}
+              {key === 'users' && pendingUsers.length > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 text-xs bg-amber-100 text-amber-600 rounded-full">{pendingUsers.length}</span>
+              )}
             </button>
           ))}
         </div>
+
+        {/* Users Tab */}
+        {tab === 'users' && (
+          <div className="space-y-4">
+            {/* Pending approvals */}
+            {pendingUsers.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+                <h3 className="text-sm font-semibold text-amber-800 mb-3 flex items-center gap-2">
+                  <UserCheck size={15} /> Pending Approvals ({pendingUsers.length})
+                </h3>
+                <div className="space-y-2">
+                  {pendingUsers.map((u: any) => (
+                    <div key={u.user_id} className="flex items-center justify-between bg-white rounded-lg p-3 border border-amber-100">
+                      <div>
+                        <p className="text-sm font-medium text-gray-800">{u.full_name || u.username}</p>
+                        <p className="text-xs text-gray-500">{u.email || 'No email'} | Requested: {u.requested_role || 'employee'}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={async () => {
+                            await approveUser(token, u.user_id, 'approve', u.requested_role || 'employee')
+                            refreshData()
+                          }}
+                          className="px-3 py-1.5 text-xs font-medium bg-green-600 text-white rounded-lg hover:bg-green-700"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await approveUser(token, u.user_id, 'reject')
+                            refreshData()
+                          }}
+                          className="px-3 py-1.5 text-xs font-medium bg-red-100 text-red-700 rounded-lg hover:bg-red-200"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* User list */}
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-3 border-b border-gray-100">
+                <h3 className="text-sm font-semibold text-gray-800">All Users ({users.length})</h3>
+                <input
+                  type="text"
+                  value={userFilter}
+                  onChange={e => setUserFilter(e.target.value)}
+                  placeholder="Search users..."
+                  className="px-3 py-1.5 text-xs border border-gray-200 rounded-lg w-48 focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                />
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 text-gray-600">
+                    <tr>
+                      <th className="text-left px-6 py-3 font-medium">User</th>
+                      <th className="text-left px-6 py-3 font-medium">Role</th>
+                      <th className="text-left px-6 py-3 font-medium">Department</th>
+                      <th className="text-left px-6 py-3 font-medium">Status</th>
+                      <th className="text-left px-6 py-3 font-medium">Joined</th>
+                      <th className="text-left px-6 py-3 font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {users
+                      .filter(u => {
+                        if (!userFilter) return true
+                        const q = userFilter.toLowerCase()
+                        return (u.username || '').toLowerCase().includes(q)
+                          || (u.full_name || '').toLowerCase().includes(q)
+                          || (u.email || '').toLowerCase().includes(q)
+                          || (u.role || '').toLowerCase().includes(q)
+                      })
+                      .map((u: any) => (
+                      <tr key={u.user_id} className="hover:bg-gray-50">
+                        <td className="px-6 py-3">
+                          <p className="font-medium text-gray-800">{u.full_name || u.username}</p>
+                          <p className="text-xs text-gray-400">{u.email || u.username}</p>
+                        </td>
+                        <td className="px-6 py-3">
+                          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700">
+                            {u.role}
+                          </span>
+                        </td>
+                        <td className="px-6 py-3 text-gray-600">{u.department || '—'}</td>
+                        <td className="px-6 py-3">
+                          {u.suspended ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">Suspended</span>
+                          ) : u.status === 'pending' ? (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-700">Pending</span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">Active</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-3 text-gray-400 text-xs">
+                          {u.created_at ? new Date(u.created_at * 1000).toLocaleDateString() : '—'}
+                        </td>
+                        <td className="px-6 py-3">
+                          {!u.suspended && u.status !== 'pending' && (
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Suspend user "${u.full_name || u.username}"?`)) return
+                                await suspendUser(token, u.user_id).catch(() => {})
+                                refreshData()
+                              }}
+                              className="flex items-center gap-1 text-xs text-red-600 hover:text-red-800"
+                              title="Suspend user"
+                            >
+                              <Ban size={12} /> Suspend
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Failed Queries Tab */}
         {tab === 'failed' && (

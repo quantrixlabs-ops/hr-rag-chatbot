@@ -16,7 +16,12 @@ VALID_PASSWORD = "TestPass123!!"
 def test_role_hierarchy():
     assert get_allowed_roles("employee") == ["employee"]
     assert get_allowed_roles("manager") == ["employee", "manager"]
-    assert get_allowed_roles("hr_admin") == ["employee", "manager", "hr_admin"]
+    # Phase A: hr_admin now includes hr_team in hierarchy
+    hr_admin_roles = get_allowed_roles("hr_admin")
+    assert "employee" in hr_admin_roles
+    assert "manager" in hr_admin_roles
+    assert "hr_team" in hr_admin_roles
+    assert "hr_admin" in hr_admin_roles
 
 
 def test_document_access():
@@ -383,7 +388,7 @@ def test_ingestion_rejects_test_documents():
 def test_ingestion_max_chunk_limit():
     """PHASE 1/9: Documents exceeding MAX_CHUNKS_PER_DOCUMENT are rejected."""
     from backend.app.services.ingestion_service import MAX_CHUNKS_PER_DOCUMENT
-    assert MAX_CHUNKS_PER_DOCUMENT == 500
+    assert MAX_CHUNKS_PER_DOCUMENT == 2000
 
 
 # ── Context bleeding prevention ──────────────────────────────────────────────

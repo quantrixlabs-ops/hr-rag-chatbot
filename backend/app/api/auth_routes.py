@@ -86,7 +86,7 @@ class RegisterRequest(BaseModel):
     full_name: str = ""
     email: str = ""
     phone: str = ""
-    role: str = "employee"
+    role: str = "employee"  # Requested role — validated against SELF_REGISTER_ROLES
     department: Optional[str] = None
 
 
@@ -130,7 +130,8 @@ async def login(req: LoginRequest, request: Request):
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
         row = con.execute(
-            "SELECT user_id,hashed_password,role,department,status,suspended FROM users WHERE username=?",
+            "SELECT user_id,hashed_password,role,department,status,suspended,"
+            "COALESCE(full_name,''),username FROM users WHERE username=?",
             (username,)
         ).fetchone()
     if not row or not verify_password(req.password, row[1]):
@@ -151,7 +152,27 @@ async def login(req: LoginRequest, request: Request):
     refresh = create_refresh_token(row[0])
     return {"access_token": token, "refresh_token": refresh, "token_type": "bearer",
             "expires_in": s.access_token_expire_minutes * 60,
-            "user": {"user_id": row[0], "role": row[2], "department": row[3]}}
+            "user": {"user_id": row[0], "role": row[2], "department": row[3],
+                     "full_name": row[6], "username": row[7]}}
+
+
+@router.get("/setup-status")
+async def setup_status():
+    """Check if any users exist — used by frontend to show bootstrap role options."""
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        count = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        has_admin = con.execute(
+            "SELECT COUNT(*) FROM users WHERE role IN ('admin','super_admin')"
+        ).fetchone()[0]
+        has_hr_head = con.execute(
+            "SELECT COUNT(*) FROM users WHERE role IN ('hr_head','hr_admin')"
+        ).fetchone()[0]
+    return {
+        "has_users": count > 0,
+        "has_admin": has_admin > 0,
+        "has_hr_head": has_hr_head > 0,
+    }
 
 
 @router.post("/register", status_code=201)
@@ -175,9 +196,35 @@ async def register(req: RegisterRequest, request: Request):
 
     s = get_settings()
     uid = str(uuid.uuid4())
-    # All new registrations are pending_approval — admin must approve
-    role = "employee"
-    status = "pending_approval"
+
+    # Bootstrap mode: when no users exist, allow admin/hr_head self-registration
+    with sqlite3.connect(s.db_path) as con:
+        user_count = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        admin_count = con.execute(
+            "SELECT COUNT(*) FROM users WHERE role IN ('admin','super_admin')"
+        ).fetchone()[0]
+        hr_head_count = con.execute(
+            "SELECT COUNT(*) FROM users WHERE role IN ('hr_head','hr_admin')"
+        ).fetchone()[0]
+
+    from backend.app.core.permissions import SELF_REGISTER_ROLES
+    requested_role = req.role.strip().lower() if req.role else "employee"
+
+    # Bootstrap roles allowed only when those roles don't exist yet
+    bootstrap_roles = set()
+    if admin_count == 0:
+        bootstrap_roles.add("admin")
+    if hr_head_count == 0:
+        bootstrap_roles.add("hr_head")
+
+    allowed_roles = SELF_REGISTER_ROLES | bootstrap_roles
+    if requested_role not in allowed_roles:
+        requested_role = "employee"  # Fallback
+
+    # Bootstrap users get auto-approved with their requested role
+    is_bootstrap = requested_role in bootstrap_roles
+    role = requested_role if is_bootstrap else "employee"
+    status = "active" if is_bootstrap else "pending_approval"
     verification_token = str(uuid.uuid4())
     # Sanitize profile fields
     import html as _html
@@ -188,16 +235,25 @@ async def register(req: RegisterRequest, request: Request):
         with sqlite3.connect(s.db_path) as con:
             con.execute(
                 "INSERT INTO users (user_id,username,hashed_password,role,department,created_at,"
-                "full_name,email,phone,status,verification_token) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "full_name,email,phone,status,verification_token,requested_role) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (uid, username, hash_password(req.password), role, req.department, time.time(),
-                 full_name, email, phone, status, verification_token))
+                 full_name, email, phone, status, verification_token, requested_role))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Username already exists")
-    log_security_event("user_registered", {"username": username, "status": status}, user_id=uid)
+    log_security_event("user_registered", {
+        "username": username, "status": status, "requested_role": requested_role,
+        "bootstrap": is_bootstrap,
+    }, user_id=uid)
+    msg = (
+        f"Registration successful. You are now the {requested_role.replace('_', ' ')}. You can log in immediately."
+        if is_bootstrap
+        else "Registration successful. Your account is pending approval."
+    )
     return {
-        "user_id": uid, "username": username, "role": role, "status": status,
-        "message": "Registration successful. Your account is pending admin approval.",
+        "user_id": uid, "username": username, "role": role,
+        "requested_role": requested_role, "status": status,
+        "message": msg,
     }
 
 
@@ -334,3 +390,112 @@ async def disable_2fa(req: TOTPVerifyRequest, user: User = Depends(get_current_u
         con.execute("UPDATE users SET totp_enabled=0, totp_secret='' WHERE user_id=?", (user.user_id,))
     log_security_event("2fa_disabled", {"user_id": user.user_id}, user_id=user.user_id)
     return {"status": "2fa_disabled"}
+
+
+# ── Phase 3: SSO / OIDC Login Flow ───────────────────────────────────────────
+
+@router.get("/sso/login")
+async def sso_login(request: Request, tenant: str = "default"):
+    """Redirect to the tenant's configured IdP for SSO login.
+
+    Query param `tenant` is the tenant slug (e.g., ?tenant=acme).
+    The IdP will redirect back to /auth/sso/callback after authentication.
+    """
+    from backend.app.core.tenant import _lookup_tenant_by_slug
+    result = _lookup_tenant_by_slug(tenant)
+    if not result:
+        raise HTTPException(404, f"Tenant '{tenant}' not found")
+
+    tenant_id, config = result
+    sso_config = config.get("sso", {})
+
+    if not config.get("features", {}).get("sso", False):
+        raise HTTPException(403, "SSO is not enabled for this organization. Contact your administrator.")
+    if not sso_config.get("client_id"):
+        raise HTTPException(503, "SSO is not configured for this organization. Contact your administrator.")
+
+    from backend.app.core.sso import configure_sso, get_sso_client
+    s = get_settings()
+    configured = configure_sso(
+        client_id=sso_config["client_id"],
+        client_secret=sso_config.get("client_secret", ""),
+        issuer_url=sso_config.get("issuer_url", ""),
+        redirect_uri=sso_config.get("redirect_uri", f"{s.ollama_base_url.replace('11434', '8000')}/api/v1/auth/sso/callback"),
+    )
+    if not configured:
+        raise HTTPException(503, "SSO client could not be initialized. Install authlib: pip install authlib")
+
+    # Store tenant slug in session state for callback
+    client = get_sso_client()
+    redirect_uri = str(request.url_for("sso_callback"))
+    # Pass tenant slug as state parameter (signed by OIDC flow)
+    return await client.hr_sso.authorize_redirect(request, redirect_uri, state=tenant)
+
+
+@router.get("/sso/callback", name="sso_callback")
+async def sso_callback(request: Request):
+    """Handle OIDC callback. Exchange code for tokens, provision user, issue JWT."""
+    from backend.app.core.sso import get_sso_client
+    import sqlite3 as _sqlite3, time as _time, uuid as _uuid
+
+    client = get_sso_client()
+    if not client:
+        raise HTTPException(503, "SSO not configured")
+
+    try:
+        token = await client.hr_sso.authorize_access_token(request)
+    except Exception as e:
+        logger.error("sso_callback_failed", error=str(e))
+        raise HTTPException(401, "SSO authentication failed. Please try again.")
+
+    userinfo = token.get("userinfo", {})
+    email = userinfo.get("email", "")
+    name = userinfo.get("name", email.split("@")[0])
+    tenant_slug = request.query_params.get("state", "default")
+
+    if not email:
+        raise HTTPException(401, "SSO provider did not return an email address")
+
+    # Resolve tenant
+    from backend.app.core.tenant import _lookup_tenant_by_slug
+    result = _lookup_tenant_by_slug(tenant_slug)
+    if not result:
+        raise HTTPException(404, "Tenant not found")
+    tenant_id, _ = result
+
+    s = get_settings()
+
+    # Auto-provision or match user by email
+    with _sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT user_id, role, status FROM users WHERE email=? AND tenant_id=?",
+            (email, tenant_slug),
+        ).fetchone()
+
+        if row:
+            user_id, role, status = row
+            if status == "suspended":
+                raise HTTPException(403, "Your account has been suspended")
+        else:
+            # Auto-provision new SSO user as employee
+            user_id = str(_uuid.uuid4())
+            role = "employee"
+            username = email.split("@")[0] + "_" + user_id[:6]
+            con.execute(
+                "INSERT INTO users (user_id,username,hashed_password,role,email,full_name,"
+                "created_at,status,email_verified,tenant_id) VALUES (?,?,?,?,?,?,?,'active',1,?)",
+                (user_id, username, "sso-auth", role, email, name, _time.time(), tenant_slug),
+            )
+            logger.info("sso_user_provisioned", user_id=user_id, email=email, tenant=tenant_slug)
+
+    from backend.app.core.security import create_access_token, create_refresh_token
+    access_token = create_access_token({"sub": user_id, "role": role, "tenant_id": tenant_id})
+    refresh_token = create_refresh_token(user_id)
+
+    log_security_event("sso_login", {"email": email, "tenant": tenant_slug}, user_id=user_id)
+
+    # Redirect to frontend with tokens in query params
+    # Frontend reads tokens from URL and stores in localStorage
+    frontend_url = f"http://localhost:3000/auth/sso/complete?access_token={access_token}&refresh_token={refresh_token}&tenant={tenant_slug}"
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=frontend_url)

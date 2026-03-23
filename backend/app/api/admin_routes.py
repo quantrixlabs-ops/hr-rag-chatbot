@@ -24,26 +24,28 @@ async def metrics(user: User = Depends(get_current_user)):
     require_role(user, "hr_admin")
     s = get_settings()
     now = time.time()
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
     with sqlite3.connect(s.db_path) as con:
-        qt = con.execute("SELECT COUNT(*) FROM query_logs WHERE timestamp>?", (now - 86400,)).fetchone()[0]
-        qw = con.execute("SELECT COUNT(*) FROM query_logs WHERE timestamp>?", (now - 604800,)).fetchone()[0]
-        avg = con.execute("SELECT AVG(latency_ms),AVG(faithfulness_score),AVG(hallucination_risk) FROM query_logs WHERE timestamp>?", (now - 604800,)).fetchone()
-        active = con.execute("SELECT COUNT(*) FROM sessions WHERE last_active>?", (now - 86400,)).fetchone()[0]
-        docs = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        chunks = con.execute("SELECT COALESCE(SUM(chunk_count),0) FROM documents").fetchone()[0]
+        qt = con.execute("SELECT COUNT(*) FROM query_logs WHERE timestamp>? AND tenant_id=?", (now - 86400, tenant_id)).fetchone()[0]
+        qw = con.execute("SELECT COUNT(*) FROM query_logs WHERE timestamp>? AND tenant_id=?", (now - 604800, tenant_id)).fetchone()[0]
+        avg = con.execute("SELECT AVG(latency_ms),AVG(faithfulness_score),AVG(hallucination_risk) FROM query_logs WHERE timestamp>? AND tenant_id=?", (now - 604800, tenant_id)).fetchone()
+        active = con.execute("SELECT COUNT(*) FROM sessions WHERE last_active>? AND tenant_id=?", (now - 86400, tenant_id)).fetchone()[0]
+        docs = con.execute("SELECT COUNT(*) FROM documents WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
+        chunks = con.execute("SELECT COALESCE(SUM(chunk_count),0) FROM documents WHERE tenant_id=?", (tenant_id,)).fetchone()[0]
         # PHASE 6: Real query success/failure metrics from logs
-        grounded = con.execute("SELECT COUNT(*) FROM query_logs WHERE faithfulness_score>=0.6 AND timestamp>?", (now - 604800,)).fetchone()[0]
-        failed = con.execute("SELECT COUNT(*) FROM query_logs WHERE faithfulness_score<0.6 AND timestamp>?", (now - 604800,)).fetchone()[0]
-        negative_fb = con.execute("SELECT COUNT(*) FROM feedback WHERE rating='negative' AND timestamp>?", (now - 604800,)).fetchone()[0]
+        grounded = con.execute("SELECT COUNT(*) FROM query_logs WHERE faithfulness_score>=0.6 AND timestamp>? AND tenant_id=?", (now - 604800, tenant_id)).fetchone()[0]
+        failed = con.execute("SELECT COUNT(*) FROM query_logs WHERE faithfulness_score<0.6 AND timestamp>? AND tenant_id=?", (now - 604800, tenant_id)).fetchone()[0]
+        negative_fb = con.execute("SELECT COUNT(*) FROM feedback WHERE rating='negative' AND timestamp>? AND tenant_id=?", (now - 604800, tenant_id)).fetchone()[0]
         # Top documents accessed — parse sources_used JSON from query_logs
         source_rows = con.execute(
-            "SELECT sources_used FROM query_logs WHERE sources_used != '' AND timestamp>?",
-            (now - 604800,)
+            "SELECT sources_used FROM query_logs WHERE sources_used != '' AND timestamp>? AND tenant_id=?",
+            (now - 604800, tenant_id)
         ).fetchall()
         # Query type distribution
         qtype_rows = con.execute(
-            "SELECT query_type, COUNT(*) FROM query_logs WHERE timestamp>? GROUP BY query_type",
-            (now - 604800,)
+            "SELECT query_type, COUNT(*) FROM query_logs WHERE timestamp>? AND tenant_id=? GROUP BY query_type",
+            (now - 604800, tenant_id)
         ).fetchall()
     # Aggregate top documents
     import json as _json
@@ -154,20 +156,22 @@ async def export_security_events(
 
 @router.get("/users")
 async def list_users(user: User = Depends(get_current_user)):
-    """List all users with status info — admin only."""
+    """List all users with status info — hr_head+ only."""
     require_role(user, "hr_admin")
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
         rows = con.execute(
             "SELECT user_id, username, role, department, full_name, email, created_at, "
-            "COALESCE(status,'active'), COALESCE(suspended,0) "
+            "COALESCE(status,'active'), COALESCE(suspended,0), "
+            "COALESCE(employee_id,''), COALESCE(branch_id,''), COALESCE(team,'') "
             "FROM users WHERE username NOT LIKE 'deleted_%' ORDER BY created_at DESC"
         ).fetchall()
     return {
         "users": [
             {"user_id": r[0], "username": r[1], "role": r[2], "department": r[3],
              "full_name": r[4], "email": r[5], "created_at": r[6],
-             "status": r[7], "suspended": bool(r[8])}
+             "status": r[7], "suspended": bool(r[8]),
+             "employee_id": r[9], "branch_id": r[10], "team": r[11]}
             for r in rows
         ],
         "count": len(rows),
@@ -176,21 +180,38 @@ async def list_users(user: User = Depends(get_current_user)):
 
 @router.get("/users/pending")
 async def list_pending_users(user: User = Depends(get_current_user)):
-    """List users awaiting approval — admin only."""
+    """List users awaiting approval — hr_head+ only.
+
+    Phase A: Shows requested_role so approver knows what role was requested.
+    HR Head sees employee/hr_team requests. Admin sees hr_head requests too.
+    """
     require_role(user, "hr_admin")
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
         rows = con.execute(
-            "SELECT user_id, username, full_name, email, department, created_at "
+            "SELECT user_id, username, full_name, email, department, created_at, "
+            "COALESCE(requested_role, 'employee') "
             "FROM users WHERE status='pending_approval' ORDER BY created_at ASC"
         ).fetchall()
+
+    # Phase A: Filter based on approval chain — show only users this approver can approve
+    from backend.app.core.permissions import APPROVAL_CHAIN
+    approver_role = user.role
+    visible = []
+    for r in rows:
+        requested = r[6]
+        allowed_approvers = APPROVAL_CHAIN.get(requested, set())
+        if approver_role in allowed_approvers:
+            visible.append(r)
+
     return {
         "pending": [
             {"user_id": r[0], "username": r[1], "full_name": r[2],
-             "email": r[3], "department": r[4], "created_at": r[5]}
-            for r in rows
+             "email": r[3], "department": r[4], "created_at": r[5],
+             "requested_role": r[6]}
+            for r in visible
         ],
-        "count": len(rows),
+        "count": len(visible),
     }
 
 
@@ -201,26 +222,54 @@ class ApprovalAction(BaseModel):
 
 @router.post("/users/{user_id}/approve")
 async def approve_or_reject_user(user_id: str, req: ApprovalAction, admin: User = Depends(get_current_user)):
-    """Approve or reject a pending user registration."""
+    """Approve or reject a pending user registration.
+
+    Phase A: Enforces approval chain —
+    - Employee/HR Team registrations → HR Head (or Admin) approves
+    - HR Head registrations → Admin only approves
+    """
     require_role(admin, "hr_admin")
     if req.action not in ("approve", "reject"):
         raise HTTPException(400, "Action must be 'approve' or 'reject'")
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
-        row = con.execute("SELECT username, status FROM users WHERE user_id=?", (user_id,)).fetchone()
+        row = con.execute(
+            "SELECT username, status, COALESCE(requested_role, 'employee') FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
         if not row:
             raise HTTPException(404, "User not found")
         if row[1] != "pending_approval":
             raise HTTPException(409, f"User is already {row[1]}")
+
+        # Phase A: Validate approval chain
+        from backend.app.core.permissions import APPROVAL_CHAIN, VALID_ROLES
+        requested_role = row[2]
+        allowed_approvers = APPROVAL_CHAIN.get(requested_role, set())
+        if admin.role not in allowed_approvers:
+            raise HTTPException(
+                403,
+                f"Your role ({admin.role}) cannot approve {requested_role} registrations. "
+                f"Required: {', '.join(sorted(allowed_approvers))}",
+            )
+
         if req.action == "approve":
-            valid_roles = {"employee", "manager", "hr_admin"}
-            role = req.role if req.role in valid_roles else "employee"
+            # Use requested_role by default, allow override if approver specifies a valid role
+            role = req.role if req.role in VALID_ROLES else requested_role
+            # Prevent approver from assigning a role higher than they can approve
+            if role not in APPROVAL_CHAIN or admin.role not in APPROVAL_CHAIN.get(role, set()):
+                role = requested_role  # Fall back to requested role
             con.execute("UPDATE users SET status='active', role=? WHERE user_id=?", (role, user_id))
         else:
             con.execute("UPDATE users SET status='rejected' WHERE user_id=?", (user_id,))
     log_security_event(
         f"user_{req.action}d",
-        {"target_user": row[0], "target_id": user_id, "assigned_role": req.role if req.action == "approve" else ""},
+        {
+            "target_user": row[0], "target_id": user_id,
+            "requested_role": requested_role,
+            "assigned_role": req.role if req.action == "approve" else "",
+            "approved_by_role": admin.role,
+        },
         user_id=admin.user_id,
     )
     return {"status": f"user_{req.action}d", "user_id": user_id, "username": row[0]}
@@ -314,12 +363,41 @@ async def get_task_status(task_id: str, user: User = Depends(get_current_user)):
     }
 
 
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_background_task(task_id: str, user: User = Depends(get_current_user)):
+    """Cancel a running or pending background task."""
+    require_role(user, "hr_admin")
+    from backend.app.core.background_tasks import cancel_task
+    cancelled = cancel_task(task_id)
+    if not cancelled:
+        raise HTTPException(409, "Task cannot be cancelled (already completed, failed, or not found)")
+    log_security_event("task_cancelled", {"task_id": task_id}, user_id=user.user_id)
+    return {"status": "cancelled", "task_id": task_id}
+
+
+@router.post("/tasks/cleanup-stale")
+async def cleanup_stale_tasks_endpoint(user: User = Depends(get_current_user)):
+    """Mark stale running tasks (>30 min) as failed."""
+    require_role(user, "hr_admin")
+    from backend.app.core.background_tasks import cleanup_stale_tasks
+    count = cleanup_stale_tasks()
+    return {"status": "cleaned", "stale_tasks_failed": count}
+
+
 @router.get("/cache/stats")
 async def cache_statistics(user: User = Depends(get_current_user)):
     """View semantic cache statistics — admin only."""
     require_role(user, "hr_admin")
-    from backend.app.core.semantic_cache import get_cache_stats
-    return get_cache_stats()
+    from backend.app.core.semantic_cache import get_detailed_stats
+    return get_detailed_stats()
+
+
+@router.get("/tenant/usage")
+async def tenant_usage(user: User = Depends(get_current_user)):
+    """View current tenant usage stats and quota utilization — admin only."""
+    require_role(user, "hr_admin")
+    from backend.app.core.tenant import TenantQuotaEnforcer
+    return TenantQuotaEnforcer.get_usage_stats()
 
 
 @router.post("/cache/clear")
@@ -362,8 +440,135 @@ async def list_ai_responses(
     }
 
 
+# ── PHASE 2: Direct user creation (admin-initiated, no approval flow) ────────
+
+class CreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: str = "employee"
+    department: str = ""
+    full_name: str = ""
+
+
+@router.post("/users", status_code=201)
+async def create_user(
+    req: CreateUserRequest,
+    admin: User = Depends(get_current_user),
+):
+    """Create a user directly without the self-registration approval flow.
+
+    Only hr_admin and super_admin can use this. User is immediately active.
+    For bulk onboarding without requiring employees to self-register.
+    """
+    require_role(admin, "hr_admin")
+    from backend.app.core.permissions import require_permission, VALID_ROLES
+    if not require_permission(admin.role, "users.create"):
+        raise HTTPException(403, "Insufficient permissions to create users")
+    if req.role not in VALID_ROLES:
+        raise HTTPException(400, f"Invalid role '{req.role}'. Valid roles: {', '.join(sorted(VALID_ROLES))}")
+
+    s = get_settings()
+
+    # Validate username
+    import re, html as html_mod
+    username = html_mod.escape(req.username.strip())
+    if not re.match(r'^[a-zA-Z0-9._-]{3,50}$', username):
+        raise HTTPException(400, "Username must be 3-50 chars: letters, numbers, dots, hyphens, underscores only")
+
+    # Validate password strength
+    pwd = req.password
+    if len(pwd) < 8 or not any(c.isdigit() for c in pwd) or not any(c.isalpha() for c in pwd):
+        raise HTTPException(400, "Password must be ≥8 chars with at least one letter and one number")
+
+    from passlib.context import CryptContext
+    _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    hashed = _pwd_ctx.hash(pwd)
+
+    import uuid as _uuid, time as _time
+    user_id = str(_uuid.uuid4())
+    now = _time.time()
+
+    with sqlite3.connect(s.db_path) as con:
+        # Check for duplicate username/email
+        if con.execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone():
+            raise HTTPException(409, f"Username '{username}' already exists")
+        if req.email and con.execute("SELECT 1 FROM users WHERE email=?", (req.email,)).fetchone():
+            raise HTTPException(409, f"Email '{req.email}' already registered")
+
+        con.execute(
+            "INSERT INTO users (user_id,username,hashed_password,role,department,full_name,"
+            "email,created_at,status,email_verified,tenant_id) VALUES (?,?,?,?,?,?,?,?,'active',1,'default')",
+            (user_id, username, hashed, req.role, req.department, req.full_name, req.email, now),
+        )
+
+    # Write audit log to PostgreSQL
+    from backend.app.database.postgres import write_audit_log
+    write_audit_log(
+        action="user.created",
+        target_type="user",
+        target_id=user_id,
+        extra={"username": username, "role": req.role, "created_by": admin.user_id},
+    )
+    log_security_event("user_created_by_admin", {"username": username, "role": req.role}, user_id=admin.user_id)
+
+    logger.info("admin_user_created", user_id=user_id, username=username, role=req.role, by=admin.user_id)
+    return {"user_id": user_id, "username": username, "role": req.role, "status": "active"}
+
+
+# ── PHASE 2: Audit log viewer ─────────────────────────────────────────────────
+
+@router.get("/audit-logs")
+async def get_audit_logs(
+    limit: int = 50,
+    offset: int = 0,
+    admin: User = Depends(get_current_user),
+):
+    """View the PostgreSQL audit trail. hr_admin only."""
+    require_role(admin, "hr_admin")
+    from backend.app.core.permissions import require_permission
+    if not require_permission(admin.role, "admin.view_audit_logs"):
+        raise HTTPException(403, "Insufficient permissions")
+
+    s = get_settings()
+    if not s.database_url.startswith("postgresql"):
+        return {"logs": [], "total": 0, "note": "Audit logs require PostgreSQL"}
+
+    try:
+        from backend.app.database.postgres import get_connection
+        from sqlalchemy import text
+        with get_connection() as conn:
+            total = conn.execute(text("SELECT COUNT(*) FROM audit_logs")).fetchone()[0]
+            rows = conn.execute(
+                text(
+                    "SELECT id, actor_id, action, target_type, target_id, ip_address, metadata, created_at "
+                    "FROM audit_logs ORDER BY created_at DESC LIMIT :lim OFFSET :off"
+                ),
+                {"lim": min(limit, 200), "off": offset},
+            ).fetchall()
+
+        logs = [
+            {
+                "id": str(r[0]),
+                "actor_id": str(r[1]) if r[1] else None,
+                "action": r[2],
+                "target_type": r[3],
+                "target_id": r[4],
+                "ip_address": r[5],
+                "metadata": r[6],
+                "created_at": str(r[7]),
+            }
+            for r in rows
+        ]
+        return {"logs": logs, "total": total, "limit": limit, "offset": offset}
+    except Exception as e:
+        logger.error("audit_log_fetch_failed", error=str(e))
+        raise HTTPException(500, "Failed to fetch audit logs")
+
+
 # ── PHASE 1: Role assignment endpoint ────────────────────────────────────────
-_VALID_ROLES = {"employee", "manager", "hr_admin"}
+# Phase A: Extended with hr_team, hr_head, admin aliases
+_VALID_ROLES = {"employee", "manager", "hr_team", "hr_head", "hr_admin", "admin", "super_admin"}
 
 
 class RoleUpdateRequest(BaseModel):
@@ -378,6 +583,9 @@ async def update_user_role(
 ):
     """Assign a role to a user — hr_admin only. Cannot demote yourself."""
     require_role(admin, "hr_admin")
+    from backend.app.core.permissions import require_permission
+    if not require_permission(admin.role, "users.change_role"):
+        raise HTTPException(403, "Insufficient permissions to change roles")
     if req.role not in _VALID_ROLES:
         raise HTTPException(400, f"Invalid role. Must be one of: {', '.join(sorted(_VALID_ROLES))}")
     if user_id == admin.user_id:
@@ -472,3 +680,48 @@ async def cleanup_vector_store(admin: User = Depends(get_current_user)):
         "removed_chunks": removed_chunks,
         "remaining_chunks": vs.total_chunks,
     }
+
+
+# ── Phase 4: GDPR Compliance & Session Maintenance ───────────────────────────
+
+@router.post("/gdpr/cleanup")
+async def gdpr_data_cleanup(
+    retention_days: int = Query(365, ge=30, le=3650),
+    user: User = Depends(get_current_user),
+):
+    """GDPR data retention cleanup — deletes user data older than retention_days.
+
+    Cleans: sessions, turns, feedback, query_logs, old security events (2yr).
+    Admin only. Logs the action for audit trail.
+    """
+    require_role(user, "hr_admin")
+    from backend.app.core.dependencies import get_registry
+    reg = get_registry()
+    ss = reg["session_store"]
+    result = ss.gdpr_cleanup(retention_days=retention_days)
+    log_security_event("gdpr_cleanup", {
+        "retention_days": retention_days,
+        "deleted": result,
+    }, user_id=user.user_id)
+    return {"status": "completed", "retention_days": retention_days, "deleted": result}
+
+
+@router.post("/sessions/cleanup-stale")
+async def cleanup_stale_sessions(
+    max_age_days: int = Query(90, ge=7, le=365),
+    user: User = Depends(get_current_user),
+):
+    """Remove stale sessions that have been inactive for max_age_days.
+
+    Admin only. Useful for periodic maintenance.
+    """
+    require_role(user, "hr_admin")
+    from backend.app.core.dependencies import get_registry
+    reg = get_registry()
+    ss = reg["session_store"]
+    count = ss.cleanup_stale_sessions(max_age_days=max_age_days)
+    log_security_event("stale_sessions_cleanup", {
+        "max_age_days": max_age_days,
+        "sessions_deleted": count,
+    }, user_id=user.user_id)
+    return {"status": "completed", "sessions_deleted": count, "max_age_days": max_age_days}

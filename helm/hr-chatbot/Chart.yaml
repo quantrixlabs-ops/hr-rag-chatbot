@@ -1,0 +1,26 @@
+apiVersion: v2
+name: hr-chatbot
+description: Enterprise HR Chatbot Platform — Helm Chart
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - hr
+  - chatbot
+  - rag
+  - llm
+  - enterprise
+maintainers:
+  - name: HR Chatbot Team
+home: https://github.com/your-org/hr-rag-chatbot
+sources:
+  - https://github.com/your-org/hr-rag-chatbot
+dependencies:
+  - name: postgresql
+    version: "13.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: redis
+    version: "17.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

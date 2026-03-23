@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS documents (
     access_roles TEXT NOT NULL, effective_date TEXT, version TEXT,
     source_filename TEXT NOT NULL, uploaded_by TEXT NOT NULL,
     uploaded_at REAL NOT NULL, page_count INTEGER DEFAULT 0, chunk_count INTEGER DEFAULT 0,
-    content_hash TEXT DEFAULT '', tenant_id TEXT DEFAULT 'default'
+    content_hash TEXT DEFAULT '', tenant_id TEXT DEFAULT 'default',
+    ingestion_status TEXT DEFAULT 'done'
 );
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -125,6 +126,110 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     tenant_id TEXT DEFAULT 'default'
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+
+-- Phase A: Tickets (lifecycle: raised→assigned→in_progress→resolved→closed→rejected)
+CREATE TABLE IF NOT EXISTS tickets (
+    ticket_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'general',
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'raised',
+    raised_by TEXT NOT NULL,
+    assigned_to TEXT DEFAULT '',
+    branch_id TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    resolved_at REAL,
+    auto_close_at REAL,
+    feedback TEXT DEFAULT '',
+    rating INTEGER DEFAULT 0,
+    tenant_id TEXT DEFAULT 'default',
+    FOREIGN KEY (raised_by) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_raised_by ON tickets(raised_by);
+CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
+CREATE INDEX IF NOT EXISTS idx_tickets_assigned ON tickets(assigned_to);
+
+CREATE TABLE IF NOT EXISTS ticket_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    performed_by TEXT NOT NULL,
+    old_value TEXT DEFAULT '',
+    new_value TEXT DEFAULT '',
+    comment TEXT DEFAULT '',
+    timestamp REAL NOT NULL,
+    FOREIGN KEY (ticket_id) REFERENCES tickets(ticket_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ticket_history_ticket ON ticket_history(ticket_id);
+
+-- Phase A: Anonymous complaints / whistleblower (visible only to HR Head)
+CREATE TABLE IF NOT EXISTS complaints (
+    complaint_id TEXT PRIMARY KEY,
+    category TEXT NOT NULL DEFAULT 'general',
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'submitted',
+    submitted_at REAL NOT NULL,
+    reviewed_by TEXT DEFAULT '',
+    reviewed_at REAL,
+    resolution TEXT DEFAULT '',
+    tenant_id TEXT DEFAULT 'default'
+);
+CREATE INDEX IF NOT EXISTS idx_complaints_status ON complaints(status);
+
+-- Phase A: Notifications
+CREATE TABLE IF NOT EXISTS notifications (
+    notification_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    notification_type TEXT NOT NULL DEFAULT 'info',
+    is_read INTEGER DEFAULT 0,
+    link TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default',
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, is_read);
+
+-- Phase A: HR Contacts
+CREATE TABLE IF NOT EXISTS hr_contacts (
+    contact_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'hr_team',
+    email TEXT NOT NULL DEFAULT '',
+    phone TEXT DEFAULT '',
+    branch_id TEXT DEFAULT '',
+    is_available INTEGER DEFAULT 1,
+    tenant_id TEXT DEFAULT 'default'
+);
+
+-- Phase A: Organization branches/locations
+CREATE TABLE IF NOT EXISTS branches (
+    branch_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    location TEXT NOT NULL DEFAULT '',
+    address TEXT DEFAULT '',
+    is_active INTEGER DEFAULT 1,
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
+);
+
+-- FAQ: Curated Q&A pairs that bypass RAG for common questions
+CREATE TABLE IF NOT EXISTS faqs (
+    faq_id TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'general',
+    is_active INTEGER DEFAULT 1,
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT 'default'
+);
+CREATE INDEX IF NOT EXISTS idx_faqs_active ON faqs(is_active);
 """
 
 
@@ -184,6 +289,37 @@ def _run_migrations(con: sqlite3.Connection) -> None:
     if not _has_column("documents", "sensitivity"):
         con.execute("ALTER TABLE documents ADD COLUMN sensitivity TEXT DEFAULT 'internal'")
 
+    # Phase A: User profile extensions
+    if not _has_column("users", "employee_id"):
+        con.execute("ALTER TABLE users ADD COLUMN employee_id TEXT DEFAULT ''")
+    if not _has_column("users", "branch_id"):
+        con.execute("ALTER TABLE users ADD COLUMN branch_id TEXT DEFAULT ''")
+    if not _has_column("users", "team"):
+        con.execute("ALTER TABLE users ADD COLUMN team TEXT DEFAULT ''")
+    if not _has_column("users", "requested_role"):
+        con.execute("ALTER TABLE users ADD COLUMN requested_role TEXT DEFAULT 'employee'")
+
+    # Ticket employee response: feedback, rating, auto-close
+    if not _has_column("tickets", "auto_close_at"):
+        con.execute("ALTER TABLE tickets ADD COLUMN auto_close_at REAL")
+    if not _has_column("tickets", "feedback"):
+        con.execute("ALTER TABLE tickets ADD COLUMN feedback TEXT DEFAULT ''")
+    if not _has_column("tickets", "rating"):
+        con.execute("ALTER TABLE tickets ADD COLUMN rating INTEGER DEFAULT 0")
+
+    # Phase A: Document approval workflow columns
+    if not _has_column("documents", "approval_status"):
+        con.execute("ALTER TABLE documents ADD COLUMN approval_status TEXT DEFAULT 'approved'")
+    if not _has_column("documents", "approved_by"):
+        con.execute("ALTER TABLE documents ADD COLUMN approved_by TEXT DEFAULT ''")
+    if not _has_column("documents", "approved_at"):
+        con.execute("ALTER TABLE documents ADD COLUMN approved_at REAL")
+
+
+# Phase 4: Session limits
+MAX_TURNS_PER_SESSION = 200  # Hard cap — prevents runaway sessions
+STALE_SESSION_DAYS = 90  # Sessions older than this are eligible for cleanup
+
 
 class SessionStore:
     def __init__(self, db_path: Optional[str] = None):
@@ -218,6 +354,21 @@ class SessionStore:
     def add_turn(self, session_id: str, role: str, content: str, metadata: Optional[dict] = None) -> None:
         now = time.time()
         with sqlite3.connect(self.db_path) as con:
+            # Phase 4: Enforce max turns per session
+            turn_count = con.execute(
+                "SELECT COUNT(*) FROM turns WHERE session_id=?", (session_id,)
+            ).fetchone()[0]
+            if turn_count >= MAX_TURNS_PER_SESSION:
+                logger.warning("session_turn_limit_reached", session_id=session_id, turns=turn_count)
+                # Trim oldest turns to make room (keep last 80% of max)
+                keep = int(MAX_TURNS_PER_SESSION * 0.8)
+                trim_count = turn_count - keep
+                con.execute(
+                    "DELETE FROM turns WHERE id IN "
+                    "(SELECT id FROM turns WHERE session_id=? ORDER BY timestamp ASC LIMIT ?)",
+                    (session_id, trim_count),
+                )
+
             con.execute(
                 "INSERT INTO turns (session_id,role,content,timestamp,metadata) VALUES (?,?,?,?,?)",
                 (session_id, role, content, now, json.dumps(metadata or {})),
@@ -247,3 +398,75 @@ class SessionStore:
         with sqlite3.connect(self.db_path) as con:
             con.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
             con.execute("DELETE FROM sessions WHERE session_id=?", (session_id,))
+
+    # ── Phase 4: Stale session cleanup ───────────────────────────────
+
+    def cleanup_stale_sessions(self, max_age_days: int = STALE_SESSION_DAYS) -> int:
+        """Delete sessions (and their turns) that have been inactive for max_age_days.
+
+        Returns the number of sessions deleted. Safe to call periodically
+        (e.g., from a background task or admin endpoint).
+        """
+        cutoff = time.time() - (max_age_days * 86400)
+        with sqlite3.connect(self.db_path) as con:
+            stale = con.execute(
+                "SELECT session_id FROM sessions WHERE last_active < ?", (cutoff,)
+            ).fetchall()
+            if not stale:
+                return 0
+            stale_ids = [r[0] for r in stale]
+            placeholders = ",".join("?" * len(stale_ids))
+            con.execute(f"DELETE FROM turns WHERE session_id IN ({placeholders})", stale_ids)
+            con.execute(f"DELETE FROM sessions WHERE session_id IN ({placeholders})", stale_ids)
+        logger.info("stale_sessions_cleaned", count=len(stale_ids), cutoff_days=max_age_days)
+        return len(stale_ids)
+
+    def get_session_turn_count(self, session_id: str) -> int:
+        """Return the number of turns in a session."""
+        with sqlite3.connect(self.db_path) as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM turns WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return row[0] if row else 0
+
+    # ── Phase 4: GDPR data retention cleanup ─────────────────────────
+
+    def gdpr_cleanup(self, retention_days: int = 365) -> dict:
+        """Delete user data older than retention_days for GDPR compliance.
+
+        Cleans: sessions, turns, feedback, query_logs.
+        Returns counts of deleted records per table.
+        """
+        cutoff = time.time() - (retention_days * 86400)
+        result: dict[str, int] = {}
+        with sqlite3.connect(self.db_path) as con:
+            # Old sessions + turns
+            old_sessions = con.execute(
+                "SELECT session_id FROM sessions WHERE last_active < ?", (cutoff,)
+            ).fetchall()
+            if old_sessions:
+                sids = [r[0] for r in old_sessions]
+                ph = ",".join("?" * len(sids))
+                cur = con.execute(f"DELETE FROM turns WHERE session_id IN ({ph})", sids)
+                result["turns"] = cur.rowcount
+                cur = con.execute(f"DELETE FROM sessions WHERE session_id IN ({ph})", sids)
+                result["sessions"] = cur.rowcount
+            else:
+                result["turns"] = 0
+                result["sessions"] = 0
+
+            # Old feedback
+            cur = con.execute("DELETE FROM feedback WHERE timestamp < ?", (cutoff,))
+            result["feedback"] = cur.rowcount
+
+            # Old query logs
+            cur = con.execute("DELETE FROM query_logs WHERE timestamp < ?", (cutoff,))
+            result["query_logs"] = cur.rowcount
+
+            # Old security events (keep 2 years for compliance, not retention_days)
+            sec_cutoff = time.time() - (730 * 86400)
+            cur = con.execute("DELETE FROM security_events WHERE timestamp < ?", (sec_cutoff,))
+            result["security_events"] = cur.rowcount
+
+        logger.info("gdpr_cleanup_complete", retention_days=retention_days, deleted=result)
+        return result

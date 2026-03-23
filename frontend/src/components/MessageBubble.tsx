@@ -1,41 +1,99 @@
-import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink, AlertCircle } from 'lucide-react'
+import { useState } from 'react'
+import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink, AlertCircle, AlertTriangle, Brain, Copy, Check } from 'lucide-react'
 import type { ChatMessage, Citation } from '../types/chat'
 
 interface Props {
   message: ChatMessage
   onFeedback?: (rating: string) => void
+  givenFeedback?: string  // 'positive' | 'negative' | undefined
   onSuggestedClick?: (question: string) => void
   onCitationClick?: (citation: Citation) => void
   onEscalate?: (query: string, answer: string) => void
 }
 
-function ConfidenceBadge({ score }: { score: number }) {
+function ConfidenceBadge({ score, sourceCount }: { score: number; sourceCount?: number }) {
   const pct = Math.round(score * 100)
-  const color =
-    pct >= 70 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-    pct >= 40 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-               'bg-red-50 text-red-700 border-red-200'
+  const barColor =
+    pct >= 70 ? 'bg-emerald-500' :
+    pct >= 40 ? 'bg-amber-500' :
+               'bg-red-500'
+  const textColor =
+    pct >= 70 ? 'text-emerald-700' :
+    pct >= 40 ? 'text-amber-700' :
+               'text-red-700'
+  const label =
+    pct >= 70 ? 'High confidence' :
+    pct >= 40 ? 'Moderate confidence' :
+               'Low confidence'
 
   return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${color}`}>
-      <Shield size={10} />
-      {pct}% confident
+    <div className="group relative inline-flex items-center gap-2">
+      {/* Mini progress bar */}
+      <div className="flex items-center gap-1.5">
+        <Shield size={10} className={textColor} />
+        <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+          <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className={`text-[11px] font-medium ${textColor}`}>{pct}%</span>
+      </div>
+      {/* Tooltip on hover */}
+      <div className="absolute bottom-full left-0 mb-1.5 hidden group-hover:block z-10">
+        <div className="bg-gray-900 text-white text-[10px] rounded-lg px-2.5 py-1.5 whitespace-nowrap shadow-lg">
+          <p className="font-medium">{label}</p>
+          {sourceCount !== undefined && sourceCount > 0 && (
+            <p className="text-gray-400 mt-0.5">Based on {sourceCount} source{sourceCount > 1 ? 's' : ''}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function IntentBadge({ intent }: { intent: string }) {
+  const labels: Record<string, { label: string; color: string }> = {
+    compound: { label: 'Multi-part', color: 'bg-purple-50 text-purple-700 border-purple-200' },
+    sensitive: { label: 'Sensitive', color: 'bg-orange-50 text-orange-700 border-orange-200' },
+    calculation: { label: 'Calculation', color: 'bg-blue-50 text-blue-700 border-blue-200' },
+    comparative: { label: 'Comparison', color: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+    procedural: { label: 'How-to', color: 'bg-teal-50 text-teal-700 border-teal-200' },
+  }
+  const info = labels[intent]
+  if (!info) return null
+
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium border ${info.color}`}>
+      <Brain size={10} />
+      {info.label}
     </span>
   )
 }
 
 /** Render markdown-like LLM output as styled HTML */
 function renderAnswer(text: string): string {
-  let html = text
+  // Phase 3: Pre-process tables before general rendering
+  let html = renderTables(text)
+
+  html = html
     // Remove [Source: ...] tags (already shown in citations below)
     .replace(/\[Source:.*?\]/g, '')
     .replace(/\[Relevance:.*?\]/g, '')
-    // Escape HTML
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Escape HTML (skip already-rendered table HTML)
+    .replace(/&(?!amp;|lt;|gt;|#)/g, '&amp;')
+    .replace(/<(?!\/?(?:table|thead|tbody|tr|th|td|div|span)\b)/g, '&lt;')
+    .replace(/(?<!["=\w])>/g, '&gt;')
     // Bold: **text**
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     // Italic: *text*
     .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>')
+    // Phase 3: Horizontal dividers --- → styled separator
+    .replace(/^---+$/gm, '<div class="my-3 border-t border-gray-200"></div>')
+    // Phase 3: Next Steps / Important / Note callout blocks
+    .replace(/^\*\*(?:Next Steps?|Action Required|What to do next)[:\s]*\*\*/gim,
+      '<div class="mt-3 mb-1 flex items-center gap-1.5 text-emerald-700 font-semibold text-[13px]"><span class="inline-block w-4 h-4 rounded bg-emerald-100 text-center text-[10px] leading-4">→</span>Next Steps</div>')
+    .replace(/^\*\*Important[:\s]*\*\*/gim,
+      '<div class="mt-3 mb-1 flex items-center gap-1.5 text-orange-700 font-semibold text-[13px]"><span class="inline-block w-4 h-4 rounded bg-orange-100 text-center text-[10px] leading-4">!</span>Important</div>')
+    .replace(/^\*\*Note[:\s]*\*\*/gim,
+      '<div class="mt-2 mb-1 flex items-center gap-1.5 text-blue-700 font-semibold text-[13px]"><span class="inline-block w-4 h-4 rounded bg-blue-100 text-center text-[10px] leading-4">i</span>Note</div>')
     // Numbered lists: "1. text"
     .replace(/^(\d+)\.\s+(.+)$/gm,
       '<li class="flex gap-2 my-1"><span class="flex-shrink-0 min-w-[20px] h-5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold flex items-center justify-center">$1</span><span>$2</span></li>')
@@ -59,6 +117,30 @@ function renderAnswer(text: string): string {
   return html
 }
 
+/** Phase 3: Convert markdown tables to styled HTML tables */
+function renderTables(text: string): string {
+  // Match markdown table blocks: header | separator | rows
+  return text.replace(
+    /^(\|.+\|)\n(\|[\s\-:|]+\|)\n((?:\|.+\|\n?)+)/gm,
+    (_match, headerLine: string, _sepLine: string, bodyBlock: string) => {
+      const headers = headerLine.split('|').filter((c: string) => c.trim())
+      const rows = bodyBlock.trim().split('\n').map((row: string) =>
+        row.split('|').filter((c: string) => c.trim())
+      )
+      const ths = headers.map((h: string) =>
+        `<th class="px-3 py-1.5 text-left text-[11px] font-semibold text-gray-600 bg-gray-50 border-b border-gray-200">${h.trim()}</th>`
+      ).join('')
+      const trs = rows.map((cells: string[]) =>
+        '<tr class="border-b border-gray-100 last:border-0">' +
+        cells.map((c: string) =>
+          `<td class="px-3 py-1.5 text-[12px] text-gray-700">${c.trim()}</td>`
+        ).join('') + '</tr>'
+      ).join('')
+      return `<div class="my-2 overflow-x-auto rounded-lg border border-gray-200"><table class="w-full"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`
+    }
+  )
+}
+
 /** Clean raw markdown from citation excerpt */
 function cleanExcerpt(text: string): string {
   return text
@@ -69,12 +151,26 @@ function cleanExcerpt(text: string): string {
     .trim()
 }
 
-export default function MessageBubble({ message, onFeedback, onSuggestedClick, onCitationClick, onEscalate }: Props) {
+export default function MessageBubble({ message, onFeedback, givenFeedback, onSuggestedClick, onCitationClick, onEscalate }: Props) {
   const isUser = message.role === 'user'
+  const [copied, setCopied] = useState(false)
 
   const confidence = message.confidence ?? message.faithfulness_score ?? 0
   const hasContent = !isUser && message.content && message.content.length > 0
   const showConfidence = hasContent && confidence > 0
+
+  const handleCopy = () => {
+    // Strip markdown formatting for clipboard
+    const plain = message.content
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\[Source:.*?\]/g, '')
+      .replace(/---+/g, '')
+      .trim()
+    navigator.clipboard.writeText(plain).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-5`}>
@@ -135,14 +231,38 @@ export default function MessageBubble({ message, onFeedback, onSuggestedClick, o
               </div>
             )}
 
-            {/* Confidence + Latency + Feedback */}
+            {/* Contradiction Warning */}
+            {!isUser && message.has_contradictions && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-700">
+                <AlertTriangle size={13} className="flex-shrink-0" />
+                <span>Some sources may contain conflicting information. Check the details above.</span>
+              </div>
+            )}
+
+            {/* Confidence + Intent + Latency + Feedback */}
             {!isUser && hasContent && (
               <div className="flex items-center gap-3 text-xs text-gray-400 px-1">
-                {showConfidence && <ConfidenceBadge score={confidence} />}
+                {/* Confidence badge hidden — not needed for employee view */}
+                {message.intent && <IntentBadge intent={message.query_type === 'compound' ? 'compound' : message.intent} />}
+                {/* Source count */}
+                {message.citations && message.citations.length > 0 && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-gray-400">
+                    <FileText size={10} />
+                    {message.citations.length} source{message.citations.length > 1 ? 's' : ''}
+                  </span>
+                )}
                 {message.latency_ms !== undefined && message.latency_ms > 0 && (
-                  <span className="text-gray-300">{(message.latency_ms / 1000).toFixed(1)}s</span>
+                  <span className="text-[11px] text-gray-300">{(message.latency_ms / 1000).toFixed(1)}s</span>
                 )}
                 <div className="flex gap-0.5 ml-auto">
+                  {/* Copy button */}
+                  <button onClick={handleCopy} className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors" title={copied ? 'Copied!' : 'Copy response'}>
+                    {copied
+                      ? <Check size={13} className="text-emerald-500" />
+                      : <Copy size={13} className="text-gray-300 hover:text-gray-500" />
+                    }
+                  </button>
+                  {/* Feedback: show clickable thumbs or confirmed state */}
                   {onFeedback && (
                     <>
                       <button onClick={() => onFeedback('positive')} className="p-1.5 hover:bg-emerald-50 rounded-lg transition-colors" title="Helpful">
@@ -153,11 +273,19 @@ export default function MessageBubble({ message, onFeedback, onSuggestedClick, o
                       </button>
                     </>
                   )}
+                  {givenFeedback && !onFeedback && (
+                    <span className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px]">
+                      {givenFeedback === 'positive'
+                        ? <><ThumbsUp size={12} className="text-emerald-500" /> <span className="text-emerald-600">Thanks!</span></>
+                        : <><ThumbsDown size={12} className="text-red-400" /> <span className="text-red-500">Noted</span></>
+                      }
+                    </span>
+                  )}
                   {onEscalate && (
                     <button onClick={() => onEscalate(message.content, message.content)}
                       className="ml-1 px-2 py-1 text-[11px] text-orange-600 bg-orange-50 border border-orange-200 rounded-lg hover:bg-orange-100 transition-colors flex items-center gap-1"
-                      title="Escalate to HR representative">
-                      <AlertCircle size={11} /> Escalate to HR
+                      title="Raise a ticket for HR assistance">
+                      <AlertCircle size={11} /> Raise Ticket
                     </button>
                   )}
                 </div>

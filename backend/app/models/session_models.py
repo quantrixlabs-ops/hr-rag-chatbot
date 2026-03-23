@@ -37,3 +37,10 @@ class ChatResult:
     chunks: list = field(default_factory=list)
     verification: Optional[object] = None
     suggested_questions: list = field(default_factory=list)
+    # ── Phase 1: Enterprise Intelligence fields ──────────────────────────
+    intent: str = "policy_lookup"
+    analysis_confidence: float = 0.8
+    is_sensitive: bool = False
+    emotional_tone: str = ""
+    # ── Phase 2: Intelligence Upgrade fields ─────────────────────────────
+    has_contradictions: bool = False

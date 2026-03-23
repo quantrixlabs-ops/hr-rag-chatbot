@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app: {{ .Release.Name }}-worker
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-worker
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-worker
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.global.image.registry }}/{{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - backend.app.workers.celery_app
+            - worker
+            - --loglevel=info
+            - --concurrency={{ .Values.worker.concurrency }}
+            - -Q
+            - {{ .Values.worker.queues }}
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: DATABASE_URL
+              value: "postgresql://hr_user:$(POSTGRES_PASSWORD)@{{ .Release.Name }}-pgbouncer:5432/hr_chatbot"
+            - name: REDIS_URL
+              value: "redis://{{ .Release.Name }}-redis-master:6379/0"
+            - name: QDRANT_URL
+              value: "http://{{ .Release.Name }}-qdrant:6333"
+            - name: OLLAMA_BASE_URL
+              value: "http://{{ .Release.Name }}-ollama:11434"
+            - name: VECTOR_STORE_BACKEND
+              value: qdrant
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: jwt-secret-key
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgresql
+                  key: password
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+---
+{{- if .Values.beat.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-beat
+  labels:
+    app: {{ .Release.Name }}-beat
+    app.kubernetes.io/component: beat
+spec:
+  replicas: 1  # Beat MUST be singleton — multiple instances cause duplicate task dispatch
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-beat
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-beat
+    spec:
+      containers:
+        - name: beat
+          image: "{{ .Values.global.image.registry }}/{{ .Values.global.image.repository }}:{{ .Values.global.image.tag }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command:
+            - celery
+            - -A
+            - backend.app.workers.celery_app
+            - beat
+            - --loglevel=info
+            - --scheduler
+            - celery.beat:PersistentScheduler
+            - --schedule
+            - /app/data/celerybeat-schedule
+          env:
+            - name: REDIS_URL
+              value: "redis://{{ .Release.Name }}-redis-master:6379/0"
+            - name: DATABASE_URL
+              value: "postgresql://hr_user:$(POSTGRES_PASSWORD)@{{ .Release.Name }}-pgbouncer:5432/hr_chatbot"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-postgresql
+                  key: password
+          resources:
+            {{- toYaml .Values.beat.resources | nindent 12 }}
+          volumeMounts:
+            - name: beat-schedule
+              mountPath: /app/data
+      volumes:
+        - name: beat-schedule
+          emptyDir: {}
+{{- end }}

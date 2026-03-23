@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: hr-chatbot
+    environment: production
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+  # ── HR Chatbot API ──────────────────────────────────────────────────────────
+  - job_name: "hr-chatbot-api"
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+
+  # ── PgBouncer ────────────────────────────────────────────────────────────────
+  - job_name: "pgbouncer"
+    static_configs:
+      - targets: ["pgbouncer:9127"]  # pgbouncer_exporter sidecar
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:9121"]  # redis_exporter sidecar
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["postgres:9187"]  # postgres_exporter sidecar
+
+  # ── Celery workers (via Flower or prometheus metrics) ──────────────────────────
+  - job_name: "celery-workers"
+    static_configs:
+      - targets: ["worker:9090"]
+    metrics_path: "/metrics"
+    scrape_interval: 30s

@@ -1,9 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
-import { getDocuments, uploadDocument, deleteDocument, batchDeleteDocuments, reindexDocument } from '../services/api'
-import { FileText, Upload, Trash2, CheckSquare, Square, MinusSquare, RefreshCw } from 'lucide-react'
+import {
+  getDocuments, uploadDocument, deleteDocument, batchDeleteDocuments,
+  reindexDocument, getPendingDocuments, approveDocument,
+} from '../services/api'
+import {
+  FileText, Upload, Trash2, CheckSquare, Square, MinusSquare, RefreshCw,
+  CheckCircle2, XCircle, Clock, Shield,
+} from 'lucide-react'
 
 interface Props {
   token: string
+  role?: string
 }
 
 interface DocItem {
@@ -14,10 +21,36 @@ interface DocItem {
   access_roles: string[]
   uploaded_at: number
   version: string | null
+  approval_status?: string
+  approved_by?: string
+  uploaded_by?: string
 }
 
-export default function UploadDocs({ token }: Props) {
+interface PendingDoc {
+  document_id: string
+  title: string
+  category: string
+  chunk_count: number
+  uploaded_at: number
+  version: string | null
+  source_filename: string
+  uploaded_by: string
+  uploaded_by_name: string
+}
+
+const APPROVAL_BADGES: Record<string, { color: string; icon: typeof Clock; label: string }> = {
+  pending: { color: 'bg-yellow-100 text-yellow-700', icon: Clock, label: 'Pending' },
+  approved: { color: 'bg-green-100 text-green-700', icon: CheckCircle2, label: 'Approved' },
+  rejected: { color: 'bg-red-100 text-red-700', icon: XCircle, label: 'Rejected' },
+}
+
+const HR_HEAD_ROLES = new Set(['hr_head', 'hr_admin', 'admin', 'super_admin'])
+
+export default function UploadDocs({ token, role = '' }: Props) {
+  const isHRHead = HR_HEAD_ROLES.has(role)
+
   const [docs, setDocs] = useState<DocItem[]>([])
+  const [pendingDocs, setPendingDocs] = useState<PendingDoc[]>([])
   const [uploading, setUploading] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [title, setTitle] = useState('')
@@ -26,6 +59,7 @@ export default function UploadDocs({ token }: Props) {
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [reindexing, setReindexing] = useState<string | null>(null)
+  const [approving, setApproving] = useState<string | null>(null)
 
   const refreshData = useCallback((clearSelection = false) => {
     getDocuments(token).then(d => {
@@ -34,7 +68,14 @@ export default function UploadDocs({ token }: Props) {
     }).catch(() => {})
   }, [token])
 
+  const refreshPending = useCallback(() => {
+    if (isHRHead) {
+      getPendingDocuments(token).then(d => setPendingDocs(d.pending || [])).catch(() => {})
+    }
+  }, [token, isHRHead])
+
   useEffect(() => { refreshData(true) }, [refreshData])
+  useEffect(() => { refreshPending() }, [refreshPending])
 
   const toggleSelect = (docId: string) => {
     setSelected(prev => {
@@ -61,6 +102,7 @@ export default function UploadDocs({ token }: Props) {
       setFile(null)
       setTitle('')
       refreshData(true)
+      refreshPending()
     } catch (err: any) {
       alert(err.message || 'Upload failed')
     } finally {
@@ -114,6 +156,20 @@ export default function UploadDocs({ token }: Props) {
     }
   }
 
+  const handleApproval = async (docId: string, action: 'approve' | 'reject', docTitle: string) => {
+    if (action === 'reject' && !confirm(`Reject "${docTitle}"? This will remove it from the search index.`)) return
+    setApproving(docId)
+    try {
+      await approveDocument(token, docId, action)
+      refreshData(true)
+      refreshPending()
+    } catch (err: any) {
+      alert(err.message || 'Approval action failed')
+    } finally {
+      setApproving(null)
+    }
+  }
+
   const isBusy = deleting !== null || bulkDeleting || reindexing !== null
 
   return (
@@ -149,7 +205,56 @@ export default function UploadDocs({ token }: Props) {
               {uploading ? 'Uploading...' : 'Upload & Index'}
             </button>
           </div>
+          {!isHRHead && (
+            <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
+              <Clock size={12} /> Documents you upload will require HR Head approval before becoming visible to employees.
+            </p>
+          )}
         </div>
+
+        {/* Pending Approvals — HR Head only */}
+        {isHRHead && pendingDocs.length > 0 && (
+          <div className="bg-white rounded-xl border border-yellow-200 overflow-hidden">
+            <div className="px-6 py-4 border-b border-yellow-200 bg-yellow-50 flex items-center gap-2">
+              <Shield size={18} className="text-yellow-600" />
+              <h2 className="text-lg font-semibold text-yellow-800">
+                Pending Approval
+                <span className="text-sm font-normal text-yellow-600 ml-2">({pendingDocs.length})</span>
+              </h2>
+            </div>
+            <div className="divide-y divide-gray-100">
+              {pendingDocs.map(d => (
+                <div key={d.document_id} className="px-6 py-3 flex items-center gap-4 hover:bg-gray-50 transition-colors">
+                  <FileText size={20} className="text-yellow-500 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{d.title}</p>
+                    <p className="text-xs text-gray-500">
+                      Uploaded by {d.uploaded_by_name} &middot; {d.category} &middot; {d.chunk_count} chunks &middot; v{d.version || '1.0'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      onClick={() => handleApproval(d.document_id, 'approve', d.title)}
+                      disabled={approving === d.document_id}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+                    >
+                      <CheckCircle2 size={13} />
+                      {approving === d.document_id ? '...' : 'Approve'}
+                    </button>
+                    <button
+                      onClick={() => handleApproval(d.document_id, 'reject', d.title)}
+                      disabled={approving === d.document_id}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 disabled:opacity-50 transition-colors"
+                    >
+                      <XCircle size={13} />
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Documents Table */}
         <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -188,15 +293,17 @@ export default function UploadDocs({ token }: Props) {
                   </th>
                   <th className="text-left px-6 py-3 font-medium">Title</th>
                   <th className="text-left px-6 py-3 font-medium">Category</th>
+                  <th className="text-left px-6 py-3 font-medium">Status</th>
                   <th className="text-left px-6 py-3 font-medium">Ver</th>
                   <th className="text-left px-6 py-3 font-medium">Chunks</th>
-                  <th className="text-left px-6 py-3 font-medium">Access</th>
                   <th className="text-right px-6 py-3 font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {docs.map(d => {
                   const isSelected = selected.has(d.document_id)
+                  const badge = APPROVAL_BADGES[d.approval_status || 'approved'] || APPROVAL_BADGES.approved
+                  const BadgeIcon = badge.icon
                   return (
                     <tr key={d.document_id} className={`group transition-colors ${isSelected ? 'bg-blue-50/60' : 'hover:bg-gray-50'}`}>
                       <td className="w-12 px-4 py-3">
@@ -208,9 +315,13 @@ export default function UploadDocs({ token }: Props) {
                       <td className="px-6 py-3">
                         <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded-full text-xs">{d.category}</span>
                       </td>
+                      <td className="px-6 py-3">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${badge.color}`}>
+                          <BadgeIcon size={11} /> {badge.label}
+                        </span>
+                      </td>
                       <td className="px-6 py-3 text-gray-500 text-xs">{d.version || '1.0'}</td>
                       <td className="px-6 py-3 text-gray-600">{d.chunk_count}</td>
-                      <td className="px-6 py-3 text-gray-500 text-xs">{d.access_roles?.join(', ')}</td>
                       <td className="px-6 py-3 text-right flex items-center justify-end gap-1.5">
                         <button onClick={() => handleReindex(d.document_id)} disabled={isBusy}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-gray-600 bg-gray-50 rounded-lg hover:bg-gray-100 disabled:opacity-40 transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100">
