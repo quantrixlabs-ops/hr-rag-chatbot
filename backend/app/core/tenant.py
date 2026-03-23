@@ -26,7 +26,7 @@ logger = structlog.get_logger()
 
 # ── Request-scoped context vars ───────────────────────────────────────────────
 _current_tenant_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "current_tenant_id", default="default"
+    "current_tenant_id", default="00000000-0000-0000-0000-000000000001"
 )
 _current_tenant_config: contextvars.ContextVar[dict] = contextvars.ContextVar(
     "current_tenant_config", default={}

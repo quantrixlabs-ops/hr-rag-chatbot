@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     is_active INTEGER DEFAULT 1
 );
 INSERT OR IGNORE INTO tenants (tenant_id, name, slug, plan, created_at, is_active)
-    VALUES ('default', 'Default Organization', 'default', 'enterprise', 0, 1);
+    VALUES ('00000000-0000-0000-0000-000000000001', 'Default Organization', 'default', 'enterprise', 0, 1);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_role TEXT NOT NULL,
     created_at REAL NOT NULL, last_active REAL NOT NULL, metadata TEXT DEFAULT '{}',
