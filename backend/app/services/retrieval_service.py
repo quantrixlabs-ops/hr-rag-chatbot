@@ -35,7 +35,10 @@ class BM25Retriever:
 
     def build_index(self, chunks: list[ChunkMetadata]) -> None:
         self.chunks = list(chunks)
-        self.index = BM25Okapi([_tokenize(c.text) for c in self.chunks])
+        if self.chunks:
+            self.index = BM25Okapi([_tokenize(c.text) for c in self.chunks])
+        else:
+            self.index = None
         logger.info("bm25_index_built", chunk_count=len(self.chunks))
 
     def add_chunks(self, new: list[ChunkMetadata]) -> None:

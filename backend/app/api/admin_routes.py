@@ -496,10 +496,11 @@ async def create_user(
         if req.email and con.execute("SELECT 1 FROM users WHERE email=?", (req.email,)).fetchone():
             raise HTTPException(409, f"Email '{req.email}' already registered")
 
+        from backend.app.core.tenant import get_current_tenant
         con.execute(
             "INSERT INTO users (user_id,username,hashed_password,role,department,full_name,"
-            "email,created_at,status,email_verified,tenant_id) VALUES (?,?,?,?,?,?,?,?,'active',1,'default')",
-            (user_id, username, hashed, req.role, req.department, req.full_name, req.email, now),
+            "email,created_at,status,email_verified,tenant_id) VALUES (?,?,?,?,?,?,?,?,'active',1,?)",
+            (user_id, username, hashed, req.role, req.department, req.full_name, req.email, now, get_current_tenant()),
         )
 
     # Write audit log to PostgreSQL

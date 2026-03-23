@@ -132,7 +132,8 @@ async def upload(
     import hashlib
     content_hash = hashlib.sha256(content).hexdigest()
     s = get_settings()
-    tenant_id = getattr(user, "tenant_id", "default") or "default"
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
     old_doc_id_to_replace = None
     with sqlite3.connect(s.db_path) as con:
         # Check by content hash — identical content replaces existing
@@ -719,7 +720,8 @@ async def upload_async(
         raise HTTPException(400, "Document title cannot be empty")
 
     # Auto-replace duplicate (tenant-scoped)
-    tenant_id = getattr(user, "tenant_id", "default") or "default"
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
     with sqlite3.connect(s.db_path) as con:
         dup = con.execute("SELECT document_id FROM documents WHERE content_hash=? AND tenant_id=?", (content_hash, tenant_id)).fetchone()
         if dup:
@@ -753,7 +755,7 @@ async def upload_async(
             filename=filename,
             category=category,
             access_roles=roles,
-            tenant_id="default",
+            tenant_id=tenant_id,
         )
         job_id = job.id
     except Exception as e:
@@ -812,6 +814,8 @@ async def retry_ingestion(document_id: str, user: User = Depends(get_current_use
     """Retry ingestion for a document that failed or is stuck in pending."""
     require_role(user, "hr_admin")
     s = get_settings()
+    from backend.app.core.tenant import get_current_tenant
+    tenant_id = get_current_tenant()
 
     with sqlite3.connect(s.db_path) as con:
         row = con.execute(
@@ -848,7 +852,7 @@ async def retry_ingestion(document_id: str, user: User = Depends(get_current_use
             filename=os.path.basename(filename).split("_", 1)[-1],  # strip UUID prefix
             category=category,
             access_roles=roles,
-            tenant_id="default",
+            tenant_id=tenant_id,
         )
         job_id = job.id
     except Exception as e:

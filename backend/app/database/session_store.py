@@ -29,7 +29,7 @@ INSERT OR IGNORE INTO tenants (tenant_id, name, slug, plan, created_at, is_activ
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_role TEXT NOT NULL,
     created_at REAL NOT NULL, last_active REAL NOT NULL, metadata TEXT DEFAULT '{}',
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE TABLE IF NOT EXISTS turns (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
@@ -42,27 +42,27 @@ CREATE TABLE IF NOT EXISTS documents (
     access_roles TEXT NOT NULL, effective_date TEXT, version TEXT,
     source_filename TEXT NOT NULL, uploaded_by TEXT NOT NULL,
     uploaded_at REAL NOT NULL, page_count INTEGER DEFAULT 0, chunk_count INTEGER DEFAULT 0,
-    content_hash TEXT DEFAULT '', tenant_id TEXT DEFAULT 'default',
+    content_hash TEXT DEFAULT '', tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
     ingestion_status TEXT DEFAULT 'done'
 );
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
     query TEXT NOT NULL, answer TEXT NOT NULL, rating TEXT NOT NULL,
-    timestamp REAL NOT NULL, user_id TEXT NOT NULL, tenant_id TEXT DEFAULT 'default'
+    timestamp REAL NOT NULL, user_id TEXT NOT NULL, tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE TABLE IF NOT EXISTS query_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT NOT NULL,
     query_type TEXT, user_role TEXT NOT NULL, faithfulness_score REAL,
     hallucination_risk REAL, latency_ms REAL, top_chunk_score REAL,
     user_feedback TEXT, timestamp REAL NOT NULL, sources_used TEXT DEFAULT '',
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL,
     hashed_password TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'employee',
     department TEXT, created_at REAL NOT NULL,
     full_name TEXT DEFAULT '', email TEXT DEFAULT '', phone TEXT DEFAULT '',
-    tenant_id TEXT DEFAULT 'default',
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
     status TEXT DEFAULT 'pending_approval',
     email_verified INTEGER DEFAULT 0,
     verification_token TEXT DEFAULT '',
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS saved_prompts (
     title TEXT NOT NULL,
     prompt_text TEXT NOT NULL,
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE TABLE IF NOT EXISTS escalations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS escalations (
     assigned_to TEXT DEFAULT '',
     created_at REAL NOT NULL,
     resolved_at REAL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE TABLE IF NOT EXISTS security_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS security_events (
     ip_address TEXT,
     details TEXT DEFAULT '{}',
     timestamp REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_security_events_ts ON security_events(timestamp);
 CREATE TABLE IF NOT EXISTS response_versions (
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS response_versions (
     model TEXT DEFAULT '',
     version INTEGER DEFAULT 1,
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_resp_versions_session ON response_versions(session_id);
 CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
     expires_at REAL NOT NULL,
     revoked INTEGER DEFAULT 0,
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
 
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS tickets (
     auto_close_at REAL,
     feedback TEXT DEFAULT '',
     rating INTEGER DEFAULT 0,
-    tenant_id TEXT DEFAULT 'default',
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
     FOREIGN KEY (raised_by) REFERENCES users(user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_tickets_raised_by ON tickets(raised_by);
@@ -174,7 +174,7 @@ CREATE TABLE IF NOT EXISTS complaints (
     reviewed_by TEXT DEFAULT '',
     reviewed_at REAL,
     resolution TEXT DEFAULT '',
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_complaints_status ON complaints(status);
 
@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     is_read INTEGER DEFAULT 0,
     link TEXT DEFAULT '',
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default',
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
     FOREIGN KEY (user_id) REFERENCES users(user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
@@ -203,7 +203,7 @@ CREATE TABLE IF NOT EXISTS hr_contacts (
     phone TEXT DEFAULT '',
     branch_id TEXT DEFAULT '',
     is_available INTEGER DEFAULT 1,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 
 -- Phase A: Organization branches/locations
@@ -214,7 +214,7 @@ CREATE TABLE IF NOT EXISTS branches (
     address TEXT DEFAULT '',
     is_active INTEGER DEFAULT 1,
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 
 -- FAQ: Curated Q&A pairs that bypass RAG for common questions
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS faqs (
     is_active INTEGER DEFAULT 1,
     created_by TEXT DEFAULT '',
     created_at REAL NOT NULL,
-    tenant_id TEXT DEFAULT 'default'
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_faqs_active ON faqs(is_active);
 """
@@ -276,7 +276,7 @@ def _run_migrations(con: sqlite3.Connection) -> None:
                       "query_logs", "security_events", "refresh_tokens"]
     for table in _tenant_tables:
         if not _has_column(table, "tenant_id"):
-            con.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT DEFAULT 'default'")
+            con.execute(f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'")
 
     # Migration: User status/approval workflow (Phase 0)
     for col, default in [("status", "'active'"), ("email_verified", "0"),
