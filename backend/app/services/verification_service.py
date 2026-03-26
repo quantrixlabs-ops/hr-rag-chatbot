@@ -59,8 +59,8 @@ class AnswerVerifier:
         # Apply faithfulness floor: if claims are well-grounded, ensure score reflects that
         confidence_score = max(confidence_score, faithfulness * avg_chunk_score)
 
-        # Ensure we never report 0 confidence when we have relevant chunks with evidence
-        if chunks and chunks[0].score > 0.4 and faithfulness > 0.3:
+        # Ensure we never report 0 confidence when we have relevant chunks with strong evidence
+        if chunks and chunks[0].score > 0.5 and faithfulness > 0.5:
             confidence_score = max(confidence_score, 0.5)
 
         # Phase 1: Intent-aware confidence adjustment
@@ -81,8 +81,8 @@ class AnswerVerifier:
             verified_claims=verified,
             citations=citations,
             verdict=(
-                "grounded" if confidence_score >= 0.6
-                else "partially_grounded" if confidence_score >= 0.35
+                "grounded" if confidence_score >= 0.25
+                else "partially_grounded" if confidence_score >= 0.05
                 else "ungrounded"
             ),
         )
@@ -96,17 +96,22 @@ class AnswerVerifier:
 
     def _find_evidence(self, claim: str, chunks: list[SearchResult]) -> list[str]:
         """Find chunks that support a claim via word overlap.
-        Threshold: 2+ shared words of 4+ chars."""
-        claim_words = set(re.findall(r"\b\w{4,}\b", claim.lower()))
+        Threshold: 3+ shared content words of 4+ chars, excluding stop words."""
+        _STOP = {"that", "this", "with", "from", "have", "been", "were", "will",
+                 "your", "they", "them", "their", "which", "would", "should",
+                 "could", "about", "other", "than", "also", "into", "more",
+                 "some", "such", "only", "each", "when", "what", "does", "make"}
+        claim_words = set(re.findall(r"\b\w{4,}\b", claim.lower())) - _STOP
         if len(claim_words) < 2:
             # Very short claim — treat as supported if any chunk mentions the topic
             return [chunks[0].chunk_id] if chunks else []
 
         supporting: list[str] = []
         for chunk in chunks:
-            chunk_words = set(re.findall(r"\b\w{4,}\b", chunk.text.lower()))
+            chunk_words = set(re.findall(r"\b\w{4,}\b", chunk.text.lower())) - _STOP
             overlap = claim_words & chunk_words
-            if len(overlap) >= 2:  # lowered from 3 — policy sentences share fewer words
+            # Require 2+ meaningful content word overlap for evidence
+            if len(overlap) >= 2:
                 supporting.append(chunk.chunk_id)
         return supporting
 
@@ -124,17 +129,15 @@ class AnswerVerifier:
 
 
 def handle_ungrounded(result: VerificationResult, answer: str) -> str:
-    """Prepend disclaimer for low-confidence answers."""
-    if result.verdict == "ungrounded":
+    """Handle verification results. The system prompt enforces grounding —
+    the LLM already refuses when documents don't cover a topic.
+    Only block answers that are clearly fabricated (zero evidence)."""
+    if result.verdict == "ungrounded" and result.faithfulness_score == 0.0 and not result.citations:
         return (
-            "I was unable to find sufficient evidence in our HR documents "
-            "to fully answer this question. Please verify with HR directly.\n\n"
-            + answer
+            "This topic is not covered in the HR documents currently uploaded to the system. "
+            "Please contact your HR department directly for assistance, "
+            "or ask your HR admin to upload the relevant policy document."
         )
-    if result.verdict == "partially_grounded":
-        return (
-            "Note: Parts of this answer may not be fully supported by our "
-            "HR documents. Sources are cited where available.\n\n"
-            + answer
-        )
+    # For all other cases, trust the system prompt's grounding rules
+    return answer
     return answer

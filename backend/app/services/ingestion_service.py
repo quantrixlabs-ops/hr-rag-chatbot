@@ -38,7 +38,7 @@ HR_CHUNK_RULES = {  # type: dict
     "onboarding": {"size": 400, "overlap": 60},
     "legal": {"size": 500, "overlap": 80},
 }
-MIN_CHUNK_WORDS = 30   # lowered — short policy paragraphs are valid
+MIN_CHUNK_WORDS = 15   # Allow short policy sections (sick leave = 20 words)
 MAX_CHUNK_WORDS = 800
 MAX_CHUNKS_PER_DOCUMENT = 2000  # Hard limit — reject documents that produce more chunks
 MAX_DOCUMENT_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
@@ -172,7 +172,12 @@ def score_chunk_quality(text: str, heading: str = "") -> float:
 
 
 def _heading_chunk(text: str, size: int = 400, overlap: int = 60) -> list[tuple[str, str]]:
-    """Split on headings first, then subdivide large sections."""
+    """Split on headings first, then subdivide large sections.
+
+    Fixed: heading regex can accidentally capture body text in multi-line
+    matches. If a "heading" contains newlines, split it — first line is
+    the heading, rest is body content that must be preserved.
+    """
     sections = re.split(HEADING_RE, text)
     out: list[tuple[str, str]] = []
     heading = ""
@@ -181,8 +186,19 @@ def _heading_chunk(text: str, size: int = 400, overlap: int = 60) -> list[tuple[
         stripped = s.strip()
         if not stripped:
             continue
+
         if HEADING_RE.match(stripped):
-            heading = stripped
+            # Check if this "heading" accidentally contains body text (multiple lines)
+            lines = stripped.split("\n")
+            if len(lines) > 1:
+                # First line is the actual heading, rest is body
+                heading = lines[0].strip()
+                body_text = "\n".join(lines[1:]).strip()
+                if body_text and len(body_text.split()) >= MIN_CHUNK_WORDS:
+                    body = f"{heading}\n\n{body_text}"
+                    out.append((body, heading))
+            else:
+                heading = stripped
             continue
 
         word_count = len(stripped.split())
@@ -195,8 +211,19 @@ def _heading_chunk(text: str, size: int = 400, overlap: int = 60) -> list[tuple[
                 body = f"{heading}\n\n{sub}" if heading else sub
                 out.append((body, heading))
 
-    # Fallback: if heading detection found nothing, use fixed-size chunking
-    if not out and text.strip():
+    # Fallback: if heading detection preserved too little text, use fixed-size chunking
+    # This catches cases where the heading regex consumed body text as headings
+    preserved_words = sum(len(t.split()) for t, _ in out)
+    total_words = len(text.split())
+    coverage = preserved_words / total_words if total_words > 0 else 1.0
+
+    if coverage < 0.5 and text.strip():
+        # Heading chunking lost more than half the text — fall back to simple chunking
+        logger.warning("heading_chunk_low_coverage",
+                        coverage=round(coverage, 2),
+                        preserved=preserved_words, total=total_words,
+                        hint="Falling back to fixed-size chunking")
+        out = []
         for sub in _fixed_chunk(text.strip(), size, overlap):
             out.append((sub, ""))
 

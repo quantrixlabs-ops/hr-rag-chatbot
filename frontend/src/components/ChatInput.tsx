@@ -1,31 +1,31 @@
 import { useState, useRef, useEffect } from 'react'
 import { Send } from 'lucide-react'
 
-// Quick-start chips shown below the input, role-aware
+// Quick-start chips — only questions that match uploaded policy documents
 const CHIPS_BY_ROLE: Record<string, string[]> = {
   employee: [
-    'How many vacation days do I have left?',
-    'What is the parental leave policy?',
-    'How do I submit a reimbursement?',
-    'What are the working hours?',
+    'What is the leave policy?',
+    'What is the anti-harassment policy?',
+    'What is the code of conduct?',
+    'What is the disciplinary policy?',
   ],
   hr_admin: [
-    'Show me pending onboarding tasks',
-    'What is the current headcount?',
-    'Summarise this month\'s policy updates',
-    'Which documents need renewal?',
+    'What is the exit process?',
+    'What is the attendance policy?',
+    'What is the conflict of interest policy?',
+    'What is the payroll policy?',
   ],
   manager: [
-    'What is the team\'s leave balance?',
-    'How do I approve a promotion?',
-    'What is the performance review schedule?',
-    'Show me the org chart',
+    'What is the leave policy?',
+    'What is the transfer policy?',
+    'What is the disciplinary process?',
+    'What is the attendance policy?',
   ],
   super_admin: [
-    'List all tenants',
-    'Show system health metrics',
-    'Summarise recent audit events',
-    'What models are active?',
+    'What is the code of conduct?',
+    'What is the anti-harassment policy?',
+    'What is the leave policy?',
+    'What is the medical policy?',
   ],
 }
 

@@ -52,7 +52,7 @@ def require_feature(feature_name: str, error_msg: Optional[str] = None) -> None:
 def get_tenant_rate_limits() -> dict:
     """Get rate limit config for the current tenant."""
     config = get_current_tenant_config()
-    defaults = {"queries_per_hour": 500, "uploads_per_day": 50}
+    defaults = {"queries_per_hour": 500, "uploads_per_day": 1000}
     return {**defaults, **config.get("rate_limits", {})}
 
 

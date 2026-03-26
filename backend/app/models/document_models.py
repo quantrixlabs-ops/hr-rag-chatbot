@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -16,6 +18,12 @@ class DocumentUploadResponse(BaseModel):
 class ReindexRequest(BaseModel):
     document_id: Optional[str] = None
     force: bool = False
+
+
+# Pydantic v2 + `from __future__ import annotations` requires model_rebuild()
+# to resolve deferred type annotations at import time
+ReindexRequest.model_rebuild()
+DocumentUploadResponse.model_rebuild()
 
 
 # ── Internal dataclasses used across services ────────────────────────────────

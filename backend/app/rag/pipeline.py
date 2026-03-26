@@ -23,7 +23,10 @@ from backend.app.prompts.system_prompt import SYSTEM_PROMPT, filter_prompt_leaka
 from backend.app.rag.context_builder import ContextBuilder
 from backend.app.rag.orchestrator import ModelGateway
 from backend.app.rag.query_analyzer import QueryAnalyzer
+from backend.app.services.correction_service import CorrectionService
 from backend.app.services.faq_service import FAQService
+from backend.app.rag.query_normalizer import normalize_query
+from backend.app.rag.reasoning_engine import build_reasoning_prompt, parse_reasoning_response, clean_answer_for_user
 from backend.app.services.retrieval_service import RetrievalOrchestrator
 from backend.app.services.contradiction_detector import ContradictionDetector
 from backend.app.services.verification_service import AnswerVerifier, handle_ungrounded
@@ -77,6 +80,9 @@ def _build_prompt(
         context=context,
         conversation_history=history or "(Start of conversation)",
     )
+    # Note: Guardrails rules are enforced via pre-guard/post-guard middleware
+    # (guardrails.py), NOT injected into the LLM prompt. Injecting 1300+ tokens
+    # of rules overwhelms small models (llama3:8b) and causes refusals.
     if personalization:
         prompt += personalization
     return prompt + f"\nEmployee: {query}\nHR Assistant:"
@@ -141,6 +147,7 @@ class RAGPipeline:
         self.s = settings or get_settings()
         self.qa = QueryAnalyzer()
         self.contradiction_detector = ContradictionDetector()
+        self.corrections = CorrectionService()
         self.faq = FAQService()
 
     def _multi_retrieve(self, sub_queries, role_filter, fallback_query):
@@ -151,7 +158,8 @@ class RAGPipeline:
 
         for sq in sub_queries[:3]:  # Cap at 3 sub-queries to limit latency
             try:
-                sq_chunks, sq_meta = self.retrieval.retrieve(sq.strip(), role_filter=role_filter)
+                sq_normalized = normalize_query(sq.strip())
+                sq_chunks, sq_meta = self.retrieval.retrieve(sq_normalized, role_filter=role_filter)
                 for c in sq_chunks:
                     if c.chunk_id not in seen_ids:
                         seen_ids.add(c.chunk_id)
@@ -195,39 +203,53 @@ class RAGPipeline:
         return query
 
     def _generate_suggestions(self, query: str, answer: str, chunks: list) -> list:
-        """Generate 2-3 follow-up question suggestions based on the answer and sources."""
+        """Generate 2-3 follow-up question suggestions based on ACTUAL document sources.
+
+        Only suggests questions about topics that exist in the uploaded documents.
+        Never suggests questions the system can't answer.
+        """
+        # Get the actual document titles from the retrieved chunks
         sources = list({c.source for c in chunks})
-        topics_in_chunks = set()
-        for c in chunks:
-            text_lower = c.text.lower()
-            for topic, keywords in [
-                ("leave", ["leave", "vacation", "pto", "time off"]),
-                ("benefits", ["benefit", "insurance", "401k", "health"]),
-                ("performance", ["performance", "review", "evaluation"]),
-                ("onboarding", ["onboarding", "new hire", "first day"]),
-                ("remote work", ["remote", "work from home", "hybrid"]),
-                ("compensation", ["salary", "pay", "bonus", "raise"]),
-            ]:
-                if any(kw in text_lower for kw in keywords):
-                    topics_in_chunks.add(topic)
-
-        # Generate contextual suggestions based on what was discussed
-        suggestions = []
         query_lower = query.lower()
-        if "leave" in query_lower or "leave" in topics_in_chunks:
-            suggestions.extend(["How do I request time off?", "Does unused leave carry over?"])
-        if "benefit" in query_lower or "benefits" in topics_in_chunks:
-            suggestions.extend(["What health insurance plans are available?", "How does the 401k matching work?"])
-        if "performance" in query_lower or "performance" in topics_in_chunks:
-            suggestions.extend(["When are performance reviews conducted?", "What are the promotion criteria?"])
-        if "remote" in query_lower or "remote work" in topics_in_chunks:
-            suggestions.extend(["What equipment is provided for remote workers?", "What are the core hours?"])
-        if "onboarding" in query_lower or "onboarding" in topics_in_chunks:
-            suggestions.extend(["What happens on my first day?", "When do benefits start?"])
+        suggestions = []
 
-        # Filter out the question that was just asked and limit to 3
-        suggestions = [s for s in suggestions if s.lower() != query_lower]
-        return suggestions[:3]
+        # Map real document titles to relevant follow-up questions
+        for source in sources:
+            src = source.lower()
+            if "leave" in src and "leave" not in query_lower:
+                suggestions.append("What are the types of leave available?")
+            elif "harassment" in src and "harassment" not in query_lower:
+                suggestions.append("What is the anti-harassment policy?")
+            elif "conduct" in src and "conduct" not in query_lower:
+                suggestions.append("What does the code of conduct cover?")
+            elif "disciplin" in src and "disciplin" not in query_lower:
+                suggestions.append("What is the disciplinary process?")
+            elif "exit" in src or "separation" in src:
+                suggestions.append("What is the exit process?")
+            elif "attendance" in src and "attendance" not in query_lower:
+                suggestions.append("What is the attendance policy?")
+            elif "payroll" in src and "payroll" not in query_lower:
+                suggestions.append("How does payroll work?")
+            elif "medical" in src and "medical" not in query_lower:
+                suggestions.append("What does the medical policy cover?")
+            elif "conflict" in src and "conflict" not in query_lower:
+                suggestions.append("What is the conflict of interest policy?")
+            elif "safety" in src or "emergency" in src:
+                suggestions.append("What are the safety guidelines?")
+            elif "training" in src or "education" in src:
+                suggestions.append("What training programs are available?")
+            elif "transfer" in src or "relocation" in src:
+                suggestions.append("What is the transfer policy?")
+
+        # Deduplicate and filter out the current question
+        seen = set()
+        unique = []
+        for s in suggestions:
+            if s.lower() not in seen and s.lower() != query_lower:
+                seen.add(s.lower())
+                unique.append(s)
+
+        return unique[:3]
 
     # ── Phase 2: Multi-question decomposition ──────────────────────────────
 
@@ -253,7 +275,8 @@ class RAGPipeline:
 
         for i, sq in enumerate(analysis.sub_queries[:3]):
             try:
-                sq_chunks, _ = self.retrieval.retrieve(sq.strip(), role_filter=role_filter)
+                sq_normalized = normalize_query(sq.strip())
+                sq_chunks, _ = self.retrieval.retrieve(sq_normalized, role_filter=role_filter)
             except Exception as e:
                 logger.warning("sub_query_retrieval_failed", sub_query=sq[:60], error=str(e))
                 sq_chunks = []
@@ -364,11 +387,11 @@ class RAGPipeline:
             a = sa["answer"]
             # Strip existing disclaimers from sub-answers to avoid repetition
             a = a.replace(
-                "I was unable to find sufficient evidence in our HR documents "
-                "to fully answer this question. Please verify with HR directly.\n\n", ""
+                "I don't have enough information in our HR documents to answer this question accurately. "
+                "Please contact your HR department directly for assistance.", ""
             ).replace(
-                "Note: Parts of this answer may not be fully supported by our "
-                "HR documents. Sources are cited where available.\n\n", ""
+                "**Note:** Some details below may not be fully covered in our HR documents. "
+                "Please verify with HR for anything not explicitly cited.\n\n", ""
             ).strip()
             parts.append(f"**{i}. {q}**\n\n{a}")
 
@@ -444,6 +467,19 @@ class RAGPipeline:
                 faithfulness_score=1.0, query_type="greeting", latency_ms=ms,
             )
 
+        # ── Stage 0: CFLS correction check — HR-approved overrides (HIGHEST PRIORITY)
+        try:
+            correction = self.corrections.match(query)
+            if correction:
+                ms = (time.time() - t0) * 1000
+                return ChatResult(
+                    answer=correction["corrected_response"],
+                    session_id="", citations=[], confidence=1.0,
+                    faithfulness_score=1.0, query_type="correction", latency_ms=ms,
+                )
+        except Exception as e:
+            logger.warning("cfls_correction_lookup_failed", error=str(e))
+
         # ── Stage 0a: FAQ fast-path — curated answers bypass RAG ─────────
         try:
             faq_match = self.faq.match(query)
@@ -496,9 +532,8 @@ class RAGPipeline:
         # ── Stage 1: Query Expansion + Retrieval ─────────────────────────
         try:
             enriched = _inject_context(query, session_turns) if session_turns else query
-            # Expand short/simple queries for better retrieval coverage
-            if analysis.complexity == "simple" and len(query.split()) <= 12:
-                enriched = self._expand_query(enriched, analysis)
+            # Normalize informal phrasing → formal HR terms for better retrieval
+            enriched = normalize_query(enriched)
             role_filter = get_allowed_roles(user_role)
             chunks, retrieval_meta = self.retrieval.retrieve(enriched, role_filter=role_filter)
         except Exception as e:
@@ -539,23 +574,55 @@ class RAGPipeline:
             user_role, department,
         )
 
-        # ── Stage 2b: Calculation reasoning hint (Phase 1) ────────────────
-        if analysis.is_calculation:
-            prompt += (
-                "\n\nIMPORTANT: This is a calculation-related question. "
-                "Show the relevant policy values and formulas from the documents. "
-                "If the answer requires personal data (hire date, grade, etc.), "
-                "state what data is needed and direct them to HR. "
-                "Never invent specific numbers for the employee."
+        # ── Stage 2b: Reasoning Engine — only for complex queries ──────────
+        # Simple queries work better without extra reasoning instructions
+        # (llama3:8b gets confused by structured output formatting on easy questions)
+        needs_reasoning = (
+            analysis.complexity == "complex"
+            or analysis.is_sensitive
+            or analysis.is_calculation
+            or contradiction_result.has_contradictions
+        )
+        if needs_reasoning:
+            prompt = build_reasoning_prompt(
+                prompt, query,
+                analysis_intent=analysis.intent,
+                is_calculation=analysis.is_calculation,
+                is_sensitive=analysis.is_sensitive,
+                has_contradictions=contradiction_result.has_contradictions,
+                user_role=user_role,
+                complexity=analysis.complexity,
             )
+
+        # ── Stage 2c: Model routing — select optimal model for query type ──
+        from backend.app.rag.model_router import select_model
+        selected_model, model_tier = select_model(
+            complexity=analysis.complexity,
+            intent=analysis.intent,
+            is_sensitive=analysis.is_sensitive,
+            is_calculation=analysis.is_calculation,
+            requires_multi_retrieval=analysis.requires_multi_retrieval,
+            query_type=analysis.query_type,
+        )
 
         # ── Stage 3: LLM Generation ─────────────────────────────────────
         try:
             llm_resp = self.llm.generate(
-                prompt, self.s.llm_model,
+                prompt, selected_model,
                 self.s.llm_temperature, self.s.max_response_tokens,
             )
-            answer_text = filter_prompt_leakage(llm_resp.text)
+            # Parse output: structured if reasoning was injected, plain otherwise
+            if needs_reasoning:
+                reasoning = parse_reasoning_response(llm_resp.text)
+                answer_text = filter_prompt_leakage(
+                    clean_answer_for_user(reasoning, user_role)
+                )
+            else:
+                answer_text = filter_prompt_leakage(llm_resp.text.strip())
+            logger.info("llm_generation_complete",
+                        model_used=selected_model, model_tier=model_tier,
+                        reasoning_used=needs_reasoning,
+                        answer_len=len(answer_text))
         except Exception as e:
             logger.error("llm_generation_failed", error=str(e), traceback=traceback.format_exc())
             ms = (time.time() - t0) * 1000
@@ -575,9 +642,9 @@ class RAGPipeline:
         answer = handle_ungrounded(verification, answer_text)
 
         # ── Stage 4a-ii: Prepend sensitive/emotional context (Phase 1) ────
-        if emotional_prefix and not answer.startswith("I was unable") and not answer.startswith("Note:"):
+        if emotional_prefix and not answer.startswith("I don't have enough") and not answer.startswith("**Note:**"):
             answer = emotional_prefix + answer
-        if sensitive_prefix and not answer.startswith("I was unable"):
+        if sensitive_prefix and not answer.startswith("I don't have enough"):
             answer = answer + sensitive_prefix
 
         # ── Stage 4a-iii: Append contradiction warning (Phase 2) ──────────
@@ -592,6 +659,13 @@ class RAGPipeline:
 
         # ── Stage 4c: PII scrubbing on outbound response ────────────────
         answer = mask_pii(answer)
+
+        # ── Stage 4d: Guardrails post-guard — validate output ──────────
+        from backend.app.core.guardrails import post_guard
+        guard_check = post_guard(answer, query)
+        if not guard_check.passed:
+            answer = guard_check.message
+            flagged = True
 
         ms = (time.time() - t0) * 1000
         self._log(query, analysis.query_type, user_role, verification, ms, chunks)

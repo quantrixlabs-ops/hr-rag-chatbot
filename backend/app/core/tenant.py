@@ -42,7 +42,8 @@ DEFAULT_CONFIG: dict = {
     "max_context_turns": 10,
     "rate_limits": {
         "queries_per_hour": 500,
-        "uploads_per_day": 50,
+        "uploads_per_day": 1000,
+        "max_documents": 10000,
     },
     "features": {
         "sso": False,
@@ -273,7 +274,7 @@ class TenantQuotaEnforcer:
         """Raise HTTPException(429) if tenant exceeded daily upload quota."""
         tid = tenant_id or get_current_tenant()
         config = get_current_tenant_config()
-        limit = config.get("rate_limits", {}).get("uploads_per_day", 50)
+        limit = config.get("rate_limits", {}).get("uploads_per_day", 1000)
 
         now = time.time()
         window = 86400  # 24 hours
@@ -295,7 +296,7 @@ class TenantQuotaEnforcer:
         """Raise HTTPException(429) if tenant has too many documents."""
         tid = tenant_id or get_current_tenant()
         config = get_current_tenant_config()
-        limit = config.get("rate_limits", {}).get("max_documents", 1000)
+        limit = config.get("rate_limits", {}).get("max_documents", 10000)
 
         try:
             import sqlite3
@@ -337,7 +338,7 @@ class TenantQuotaEnforcer:
             "queries_this_hour": query_count,
             "query_limit_per_hour": limits.get("queries_per_hour", 500),
             "uploads_today": upload_count,
-            "upload_limit_per_day": limits.get("uploads_per_day", 50),
+            "upload_limit_per_day": limits.get("uploads_per_day", 1000),
         }
 
 

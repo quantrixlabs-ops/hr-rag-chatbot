@@ -70,9 +70,9 @@ def _remove_document_chunks(document_id: str, s=None) -> int:
     logger.info("document_removed", document_id=document_id, chunks_removed=removed)
     return removed
 
-# Upload rate limiting: 5 uploads per minute per user
+# Upload rate limiting: 200 uploads per minute per user (supports large batch upload)
 _upload_rate: defaultdict = defaultdict(list)
-UPLOAD_RATE_LIMIT = 5
+UPLOAD_RATE_LIMIT = 200
 UPLOAD_RATE_WINDOW = 60
 
 
@@ -240,11 +240,17 @@ async def upload(
 
 
 @router.get("/{document_id}/content")
-async def get_document_content(document_id: str, user: User = Depends(get_current_user)):
-    """Return the full text content of a document with chunk boundaries.
+async def get_document_content(
+    document_id: str,
+    user: User = Depends(get_current_user),
+    page: int = 0,
+    window: int = 5,
+):
+    """Return document content with optional pagination.
 
-    Used by the frontend document viewer to show source text with
-    highlighted sections that were used to answer a query.
+    When page > 0, only extract pages in [page-window, page+window] range
+    from the PDF — avoids re-parsing all 600 pages on every citation click.
+    When page == 0 (default), returns all pages (legacy behaviour).
     """
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
@@ -267,17 +273,29 @@ async def get_document_content(document_id: str, user: User = Depends(get_curren
 
     ext = os.path.splitext(row[2])[1].lower()
     pages = []
+    total_pages = 0
+
+    paginated = page > 0  # True = fast path, only extract a page window
 
     if ext == ".pdf":
         try:
             import pdfplumber
             with pdfplumber.open(filepath) as pdf:
-                for i, page in enumerate(pdf.pages, 1):
-                    text = page.extract_text() or ""
-                    pages.append({"page": i, "text": text})
+                total_pages = len(pdf.pages)
+                if paginated:
+                    lo = max(0, page - 1 - window)
+                    hi = min(total_pages, page - 1 + window + 1)
+                    for i in range(lo, hi):
+                        text = pdf.pages[i].extract_text() or ""
+                        pages.append({"page": i + 1, "text": text})
+                else:
+                    for i, pg in enumerate(pdf.pages, 1):
+                        text = pg.extract_text() or ""
+                        pages.append({"page": i, "text": text})
         except Exception:
             with open(filepath, "r", errors="ignore") as f:
                 pages = [{"page": 1, "text": f.read()}]
+            total_pages = 1
     elif ext == ".docx":
         try:
             import docx
@@ -286,13 +304,14 @@ async def get_document_content(document_id: str, user: User = Depends(get_curren
             pages = [{"page": 1, "text": full_text}]
         except Exception:
             pages = [{"page": 1, "text": "(Could not read .docx file)"}]
+        total_pages = 1
     else:
         with open(filepath, "r", errors="ignore") as f:
             content = f.read()
         # Split into sections by headings for better navigation
         lines = content.split("\n")
         current_page = 1
-        current_text = []
+        current_text: list[str] = []
         for line in lines:
             if line.startswith("# ") and current_text:
                 pages.append({"page": current_page, "text": "\n".join(current_text)})
@@ -302,29 +321,31 @@ async def get_document_content(document_id: str, user: User = Depends(get_curren
                 current_text.append(line)
         if current_text:
             pages.append({"page": current_page, "text": "\n".join(current_text)})
+        total_pages = len(pages)
 
-    # Get the indexed chunks for this document (for highlighting)
-    reg = get_registry()
-    vs = reg["vector_store"]
-    chunk_highlights = []
-    for meta in vs.metadata:
-        if meta.document_id == document_id:
-            chunk_highlights.append({
-                "chunk_index": meta.chunk_index,
-                "page": meta.page,
-                "text_preview": meta.text[:150],
-                "section": meta.section_heading or "",
-            })
+    # Chunk highlights — skip on paginated requests (not needed for viewer)
+    chunk_highlights: list[dict] = []
+    if not paginated:
+        reg = get_registry()
+        vs = reg["vector_store"]
+        for meta in vs.metadata:
+            if meta.document_id == document_id:
+                chunk_highlights.append({
+                    "chunk_index": meta.chunk_index,
+                    "page": meta.page,
+                    "text_preview": meta.text[:150],
+                    "section": meta.section_heading or "",
+                })
 
     return {
         "document_id": document_id,
         "title": row[0],
         "category": row[1],
         "version": row[4],
-        "page_count": len(pages),
+        "page_count": total_pages or len(pages),
         "chunk_count": row[6],
         "pages": pages,
-        "chunks": sorted(chunk_highlights, key=lambda c: c["chunk_index"]),
+        "chunks": sorted(chunk_highlights, key=lambda c: c["chunk_index"]) if chunk_highlights else [],
     }
 
 

@@ -79,6 +79,13 @@ async def chat_query(req: ChatQueryRequest, user: User = Depends(get_current_use
         log_security_event("prompt_injection_blocked", {"query_preview": query[:80]}, user_id=user.user_id)
         raise HTTPException(400, "Query blocked by security filter")
 
+    # Guardrails pre-guard: advanced injection + data extraction detection
+    from backend.app.core.guardrails import pre_guard
+    guard_result = pre_guard(query, user.role)
+    if not guard_result.passed:
+        log_security_event(f"guardrail_{guard_result.violation_type}", {"query_preview": query[:80], "severity": guard_result.severity}, user_id=user.user_id)
+        return ChatQueryResponse(answer=guard_result.message, session_id=req.session_id or "", confidence=0.0, faithfulness_score=0.0, query_type="blocked")
+
     # Phase 4: Repeated-query abuse detection
     query_hash = hashlib.sha256(query.lower().encode()).hexdigest()[:16]
     if check_repeated_query(user.user_id, query_hash):
@@ -242,6 +249,13 @@ async def chat_query_stream(req: ChatQueryRequest, user: User = Depends(get_curr
     if check_prompt_injection(query):
         log_security_event("prompt_injection_blocked", {"query_preview": query[:80]}, user_id=user.user_id)
         raise HTTPException(400, "Query blocked by security filter")
+
+    # Guardrails pre-guard (streaming path)
+    from backend.app.core.guardrails import pre_guard
+    guard_result = pre_guard(query, user.role)
+    if not guard_result.passed:
+        log_security_event(f"guardrail_{guard_result.violation_type}", {"query_preview": query[:80]}, user_id=user.user_id)
+        raise HTTPException(400, guard_result.message)
 
     # Phase 4: Repeated-query abuse detection (log only, don't block stream)
     stream_query_hash = hashlib.sha256(query.lower().encode()).hexdigest()[:16]

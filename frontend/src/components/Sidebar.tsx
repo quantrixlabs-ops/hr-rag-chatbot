@@ -105,10 +105,12 @@ export default function Sidebar({
             className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${currentPage === 'tickets' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
             <Ticket size={16} />
           </button>
-          <button onClick={() => onNavigate('complaints')} title="Complaints"
-            className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${currentPage === 'complaints' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
-            <Shield size={16} />
-          </button>
+          {isHR && (
+            <button onClick={() => onNavigate('complaints')} title="Complaints"
+              className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${currentPage === 'complaints' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
+              <Shield size={16} />
+            </button>
+          )}
           <button onClick={() => onNavigate('contact-hr')} title="Contact HR"
             className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${currentPage === 'contact-hr' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
             <Phone size={16} />
@@ -284,10 +286,12 @@ export default function Sidebar({
             <Ticket size={14} /> Tickets
           </button>
 
-          <button onClick={() => onNavigate('complaints')}
-            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${currentPage === 'complaints' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
-            <Shield size={14} /> Complaints
-          </button>
+          {isHR && (
+            <button onClick={() => onNavigate('complaints')}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${currentPage === 'complaints' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>
+              <Shield size={14} /> Complaints
+            </button>
+          )}
 
           <button onClick={() => onNavigate('contact-hr')}
             className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${currentPage === 'contact-hr' ? 'bg-gray-700 text-white' : 'hover:bg-gray-800'}`}>

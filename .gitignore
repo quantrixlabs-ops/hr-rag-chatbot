@@ -35,3 +35,6 @@ htmlcov/
 # Build
 *.so
 *.dylib
+
+# Next.js build output
+.next/

@@ -126,6 +126,7 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
     setLoading(true)
     setError('')
     const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+    // Step 1: find the matching document ID from the documents list
     fetch(`${base}/documents`, {
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
     })
@@ -144,15 +145,17 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
             return overlap >= Math.min(2, srcWords.length)
           })
         if (!match) { setError(`Document "${citation.source}" not found in your documents list`); setLoading(false); return }
-        return getDocumentContent(token, match.document_id)
+        // Step 2: fetch only a window of pages around the cited page (fast)
+        const citedPage = citation.page || 1
+        return getDocumentContent(token, match.document_id, citedPage, 5)
       })
       .then(content => {
         if (content) {
           setDoc(content)
-          // Find the actual section containing the cited excerpt — NOT just citation.page
+          // Find the best page within the returned window
           const found = findExcerptPage(content.pages, citation.excerpt)
-          setSourcePage(found)
-          setCurrentPage(found)
+          setSourcePage(content.pages[found - 1]?.page || citation.page || 1)
+          setCurrentPage(content.pages[found - 1]?.page || citation.page || 1)
         }
       })
       .catch(() => setError('Failed to load document'))
@@ -169,7 +172,8 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
     }
   }, [currentPage, loading, doc])
 
-  const page = doc?.pages[currentPage - 1]
+  // Find the current page object by page number (pages may be a paginated window)
+  const page = doc?.pages.find(p => p.page === currentPage) || doc?.pages[0]
   const renderedHTML = useMemo(
     () => page ? renderMarkdown(page.text, citation.excerpt) : '',
     [page, citation.excerpt]
@@ -177,12 +181,12 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
 
   const catColor = CATEGORY_COLORS[doc?.category || ''] || 'bg-gray-100 text-gray-700'
 
-  // Build section sidebar from page titles
+  // Build section sidebar from available pages
   const sections = useMemo(() => {
     if (!doc) return []
-    return doc.pages.map((p, i) => {
-      const firstLine = p.text.split('\n').find(l => l.trim())?.replace(/^#+\s*/, '').trim() || `Section ${i + 1}`
-      return { page: i + 1, title: firstLine.substring(0, 40) }
+    return doc.pages.map(p => {
+      const firstLine = p.text.split('\n').find(l => l.trim())?.replace(/^#+\s*/, '').trim() || `Page ${p.page}`
+      return { page: p.page, title: firstLine.substring(0, 40) }
     })
   }, [doc])
 
@@ -288,18 +292,23 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
         </div>
 
         {/* ── Footer navigation ── */}
-        {doc && doc.pages.length > 1 && (
+        {doc && doc.pages.length > 1 && (() => {
+          const pageNums = doc.pages.map(p => p.page)
+          const curIdx = pageNums.indexOf(currentPage)
+          const hasPrev = curIdx > 0
+          const hasNext = curIdx < pageNums.length - 1
+          return (
           <div className="flex items-center justify-between px-6 py-3 border-t border-gray-200 bg-gray-50/80">
             <button
-              onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-              disabled={currentPage <= 1}
+              onClick={() => hasPrev && setCurrentPage(pageNums[curIdx - 1])}
+              disabled={!hasPrev}
               className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-30 transition-colors"
             >
               <ChevronLeft size={16} /> Previous
             </button>
             <div className="flex items-center gap-3">
               <span className="text-sm text-gray-500">
-                Section <strong className="text-gray-700">{currentPage}</strong> of {doc.pages.length}
+                Page <strong className="text-gray-700">{currentPage}</strong> of {doc.page_count}
               </span>
               {sourcePage !== currentPage && (
                 <button
@@ -311,14 +320,14 @@ export default function DocumentViewer({ token, citation, onClose }: Props) {
               )}
             </div>
             <button
-              onClick={() => setCurrentPage(p => Math.min(doc.pages.length, p + 1))}
-              disabled={currentPage >= doc.pages.length}
+              onClick={() => hasNext && setCurrentPage(pageNums[curIdx + 1])}
+              disabled={!hasNext}
               className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-30 transition-colors"
             >
               Next <ChevronRight size={16} />
             </button>
-          </div>
-        )}
+          </div>)
+        })()}
       </div>
     </div>
   )

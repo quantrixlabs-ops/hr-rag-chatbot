@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS users (
     verification_token TEXT DEFAULT '',
     suspended INTEGER DEFAULT 0,
     totp_secret TEXT DEFAULT '',
-    totp_enabled INTEGER DEFAULT 0
+    totp_enabled INTEGER DEFAULT 0,
+    secret_question TEXT DEFAULT '',
+    secret_answer_hash TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS saved_prompts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +146,12 @@ CREATE TABLE IF NOT EXISTS tickets (
     auto_close_at REAL,
     feedback TEXT DEFAULT '',
     rating INTEGER DEFAULT 0,
+    -- Escalation fields (empty for normal tickets)
+    is_escalation INTEGER DEFAULT 0,
+    escalation_reason TEXT DEFAULT '',
+    chat_history TEXT DEFAULT '',
+    ai_suggestion TEXT DEFAULT '',
+    hr_response TEXT DEFAULT '',
     tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
     FOREIGN KEY (raised_by) REFERENCES users(user_id)
 );
@@ -230,6 +238,127 @@ CREATE TABLE IF NOT EXISTS faqs (
     tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
 );
 CREATE INDEX IF NOT EXISTS idx_faqs_active ON faqs(is_active);
+
+-- CFLS: Enhanced feedback with issue categories and detailed tracking
+CREATE TABLE IF NOT EXISTS feedback_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    user_role TEXT NOT NULL DEFAULT 'employee',
+    department TEXT DEFAULT '',
+    session_id TEXT DEFAULT '',
+    query TEXT NOT NULL,
+    response TEXT NOT NULL,
+    feedback_type TEXT NOT NULL DEFAULT 'negative',
+    issue_category TEXT DEFAULT '',
+    custom_comment TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_by TEXT DEFAULT '',
+    reviewed_at REAL,
+    review_notes TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_logs_status ON feedback_logs(status);
+CREATE INDEX IF NOT EXISTS idx_feedback_logs_created ON feedback_logs(created_at);
+
+-- CFLS: HR-approved knowledge corrections (highest priority in response pipeline)
+CREATE TABLE IF NOT EXISTS knowledge_corrections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_pattern TEXT NOT NULL,
+    corrected_response TEXT NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '',
+    source_feedback_id INTEGER,
+    approved_by TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    use_count INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001',
+    FOREIGN KEY (source_feedback_id) REFERENCES feedback_logs(id)
+);
+CREATE INDEX IF NOT EXISTS idx_corrections_active ON knowledge_corrections(is_active);
+
+-- CLS: Version history for knowledge corrections (audit trail + rollback)
+CREATE TABLE IF NOT EXISTS knowledge_correction_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    correction_id INTEGER NOT NULL,
+    version_number INTEGER NOT NULL DEFAULT 1,
+    query_pattern TEXT NOT NULL,
+    corrected_response TEXT NOT NULL,
+    keywords TEXT DEFAULT '',
+    change_summary TEXT DEFAULT '',
+    changed_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (correction_id) REFERENCES knowledge_corrections(id)
+);
+CREATE INDEX IF NOT EXISTS idx_correction_versions_cid ON knowledge_correction_versions(correction_id);
+
+-- CLS: Learning queue — auto-populated from repeated negative feedback patterns
+CREATE TABLE IF NOT EXISTS learning_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_pattern TEXT NOT NULL,
+    sample_query TEXT NOT NULL DEFAULT '',
+    sample_response TEXT NOT NULL DEFAULT '',
+    feedback_count INTEGER DEFAULT 1,
+    issue_category TEXT DEFAULT '',
+    ai_suggested_response TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_by TEXT DEFAULT '',
+    reviewed_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+CREATE INDEX IF NOT EXISTS idx_learning_queue_status ON learning_queue(status);
+
+-- External AI Providers (Admin-only configuration)
+CREATE TABLE IF NOT EXISTS ai_providers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_name TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    api_key_encrypted TEXT NOT NULL DEFAULT '',
+    model_name TEXT NOT NULL DEFAULT '',
+    base_url TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'inactive',
+    priority INTEGER NOT NULL DEFAULT 99,
+    max_tokens INTEGER DEFAULT 1024,
+    temperature REAL DEFAULT 0.0,
+    usage_count INTEGER DEFAULT 0,
+    usage_limit INTEGER DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+CREATE INDEX IF NOT EXISTS idx_ai_providers_status ON ai_providers(status);
+
+-- AI usage logs (audit trail for external API calls)
+CREATE TABLE IF NOT EXISTS ai_usage_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_name TEXT NOT NULL,
+    model_name TEXT NOT NULL DEFAULT '',
+    query_hash TEXT NOT NULL DEFAULT '',
+    response_time_ms REAL DEFAULT 0,
+    prompt_tokens INTEGER DEFAULT 0,
+    completion_tokens INTEGER DEFAULT 0,
+    success INTEGER DEFAULT 1,
+    error_message TEXT DEFAULT '',
+    fallback_from TEXT DEFAULT '',
+    timestamp REAL NOT NULL,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+CREATE INDEX IF NOT EXISTS idx_ai_usage_ts ON ai_usage_logs(timestamp);
+
+-- AI Mode: admin chooses between internal (Ollama) or external API
+CREATE TABLE IF NOT EXISTS ai_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    ai_mode TEXT NOT NULL DEFAULT 'internal',
+    active_provider TEXT NOT NULL DEFAULT '',
+    updated_by TEXT DEFAULT '',
+    updated_at REAL DEFAULT 0,
+    tenant_id TEXT DEFAULT '00000000-0000-0000-0000-000000000001'
+);
+INSERT OR IGNORE INTO ai_settings (id, ai_mode, active_provider) VALUES (1, 'internal', '');
 """
 
 
@@ -314,6 +443,19 @@ def _run_migrations(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE documents ADD COLUMN approved_by TEXT DEFAULT ''")
     if not _has_column("documents", "approved_at"):
         con.execute("ALTER TABLE documents ADD COLUMN approved_at REAL")
+
+    # Escalation fields on tickets table
+    for col, default in [("is_escalation", "0"), ("escalation_reason", "''"),
+                         ("chat_history", "''"), ("ai_suggestion", "''"), ("hr_response", "''")]:
+        if not _has_column("tickets", col):
+            dtype = "INTEGER" if col == "is_escalation" else "TEXT"
+            con.execute(f"ALTER TABLE tickets ADD COLUMN {col} {dtype} DEFAULT {default}")
+
+    # Forgot password: secret question fields
+    if not _has_column("users", "secret_question"):
+        con.execute("ALTER TABLE users ADD COLUMN secret_question TEXT DEFAULT ''")
+    if not _has_column("users", "secret_answer_hash"):
+        con.execute("ALTER TABLE users ADD COLUMN secret_answer_hash TEXT DEFAULT ''")
 
 
 # Phase 4: Session limits

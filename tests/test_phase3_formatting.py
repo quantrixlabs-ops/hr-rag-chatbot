@@ -21,7 +21,7 @@ class TestSystemPrompt:
 
     def test_contains_base_rules(self):
         assert "ONLY" in SYSTEM_PROMPT
-        assert "Cite sources" in SYSTEM_PROMPT or "CITE EVERY CLAIM" in SYSTEM_PROMPT
+        assert "cite" in SYSTEM_PROMPT.lower() or "CITE EVERY CLAIM" in SYSTEM_PROMPT
         assert "invent" in SYSTEM_PROMPT.lower() or "NEVER FABRICATE" in SYSTEM_PROMPT
         assert "instructions" in SYSTEM_PROMPT.lower() or "SECURITY" in SYSTEM_PROMPT
 

@@ -14,9 +14,13 @@ import structlog
 logger = structlog.get_logger()
 
 # Profanity/slur patterns (common patterns, not exhaustive)
+# Note: "ass" excluded as standalone pattern — it causes false positives on
+# "assign", "assessment", "assumptions", "class", "assist", etc.
 _PROFANITY_PATTERNS = [
-    r"\b(?:fuck|shit|damn|ass|bitch|bastard|crap|dick|piss)\w*\b",
-    r"\b(?:nigger|faggot|retard|slut|whore)\w*\b",
+    r"\b\w*(?:fuck|shit|damn|bitch|bastard|crap|piss)\w*\b",
+    r"\b(?:ass(?:hole|hat|wipe))\b",  # Only match explicit compound slurs with "ass"
+    r"\b(?:dick)\b",  # Exact match only — avoids "dictionary", "predict"
+    r"\b\w*(?:nigger|faggot|retard|slut|whore)\w*\b",
 ]
 
 # Harmful advice patterns (should never appear in HR responses)

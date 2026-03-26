@@ -68,7 +68,11 @@ def test_handle_ungrounded():
     from backend.app.services.verification_service import handle_ungrounded
     from backend.app.models.document_models import VerificationResult
     r = VerificationResult(0.3, 0.7, [], [], "ungrounded")
-    assert "unable to find sufficient evidence" in handle_ungrounded(r, "answer").lower()
+    hallucinated_text = "The company gives 30 days of vacation to all employees."
+    result = handle_ungrounded(r, hallucinated_text)
+    # Ungrounded answers must be blocked — original hallucinated text should NOT appear
+    assert hallucinated_text not in result
+    assert "don't have enough information" in result.lower() or "contact" in result.lower()
 
 
 # ── Session tests ────────────────────────────────────────────────────────────

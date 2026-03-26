@@ -38,6 +38,100 @@ export interface RegisterData {
   email?: string
   phone?: string
   role?: string
+  secret_question?: string
+  secret_answer?: string
+}
+
+// ── Forgot Password ──────────────────────────────────────────────────────────
+export async function forgotPassword(username: string) {
+  const res = await fetch(`${BASE}/auth/forgot-password`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Request failed')
+  }
+  return res.json()
+}
+
+export async function verifySecretAnswer(username: string, secretAnswer: string) {
+  const res = await fetch(`${BASE}/auth/verify-secret`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, secret_answer: secretAnswer }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Verification failed')
+  }
+  return res.json()
+}
+
+export async function resetPassword(username: string, secretAnswer: string, newPassword: string) {
+  const res = await fetch(`${BASE}/auth/reset-password`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, secret_answer: secretAnswer, new_password: newPassword }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Password reset failed')
+  }
+  return res.json()
+}
+
+export async function changePassword(token: string, currentPassword: string, newPassword: string) {
+  const res = await handleResponse(await fetch(`${BASE}/auth/change-password`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Password change failed')
+  }
+  return res.json()
+}
+
+// ── Email OTP Reset (Phase 2) ────────────────────────────────────────────────
+export async function checkEmailResetAvailable() {
+  const res = await fetch(`${BASE}/auth/email-reset-available`)
+  if (!res.ok) return { available: false }
+  return res.json()
+}
+
+export async function requestOtp(username: string) {
+  const res = await fetch(`${BASE}/auth/request-otp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'OTP request failed')
+  }
+  return res.json()
+}
+
+export async function verifyOtp(username: string, otpCode: string) {
+  const res = await fetch(`${BASE}/auth/verify-otp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, otp_code: otpCode }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'OTP verification failed')
+  }
+  return res.json()
+}
+
+export async function resetWithOtp(username: string, otpCode: string, newPassword: string) {
+  const res = await fetch(`${BASE}/auth/reset-with-otp`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, otp_code: otpCode, new_password: newPassword }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Password reset failed')
+  }
+  return res.json()
 }
 
 export async function getSetupStatus(): Promise<{ has_users: boolean; has_admin: boolean; has_hr_head: boolean }> {
@@ -129,8 +223,12 @@ export async function uploadDocument(token: string, file: File, title: string, c
   return res.json()
 }
 
-export async function getDocumentContent(token: string, documentId: string) {
-  const res = await handleResponse(await fetch(`${BASE}/documents/${documentId}/content`, { headers: headers(token) }))
+export async function getDocumentContent(token: string, documentId: string, page?: number, window?: number) {
+  const params = new URLSearchParams()
+  if (page && page > 0) params.set('page', String(page))
+  if (window && window > 0) params.set('window', String(window))
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  const res = await handleResponse(await fetch(`${BASE}/documents/${documentId}/content${qs}`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch document content')
   return res.json()
 }
@@ -196,12 +294,38 @@ export async function getSecurityEvents(token: string) {
 }
 
 // ── Escalation ─────────────────────────────────────────────────────────────
-export async function escalateToHR(token: string, query: string, answer: string, sessionId?: string | null, reason?: string) {
-  const res = await handleResponse(await fetch(`${BASE}/chat/escalate`, {
+export async function escalateToHR(token: string, query: string, answer: string, sessionId?: string | null, reason?: string, chatHistory?: {role: string, content: string}[]) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/escalate`, {
     method: 'POST', headers: headers(token),
-    body: JSON.stringify({ query, answer, session_id: sessionId, reason: reason || 'User requested human assistance' }),
+    body: JSON.stringify({
+      query, answer, session_id: sessionId,
+      reason: reason || 'Employee needs further HR assistance',
+      chat_history: chatHistory || null,
+    }),
   }))
   if (!res.ok) throw new Error('Escalation failed')
+  return res.json()
+}
+
+export async function getEscalations(token: string, status?: string) {
+  const qs = status ? `?status=${status}` : ''
+  const res = await handleResponse(await fetch(`${BASE}/tickets/escalations/list${qs}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch escalations')
+  return res.json()
+}
+
+export async function getEscalationDetail(token: string, ticketId: string) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}/escalation-detail`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch escalation detail')
+  return res.json()
+}
+
+export async function hrRespondToEscalation(token: string, ticketId: string, hrResponse: string, resolve: boolean = true) {
+  const res = await handleResponse(await fetch(`${BASE}/tickets/${ticketId}/hr-respond`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ hr_response: hrResponse, resolve }),
+  }))
+  if (!res.ok) throw new Error('Failed to submit HR response')
   return res.json()
 }
 
@@ -322,6 +446,168 @@ export async function sendMessageStream(
   }
 }
 
+// ── CFLS: Controlled Feedback Learning System ────────────────────────────────
+
+export async function sendDetailedFeedback(
+  token: string, sessionId: string, query: string, response: string,
+  feedbackType: string, issueCategory: string, customComment: string
+) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/feedback`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({
+      session_id: sessionId, query, response,
+      feedback_type: feedbackType,
+      issue_category: issueCategory,
+      custom_comment: customComment,
+    }),
+  }))
+  if (!res.ok) throw new Error('Failed to submit feedback')
+  return res.json()
+}
+
+export async function getCflsFeedback(token: string, status?: string) {
+  const qs = status ? `?status=${status}` : ''
+  const res = await handleResponse(await fetch(`${BASE}/cfls/feedback${qs}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch feedback')
+  return res.json()
+}
+
+export async function reviewFeedback(token: string, feedbackId: number, status: string, reviewNotes: string) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/feedback/${feedbackId}`, {
+    method: 'PATCH', headers: headers(token),
+    body: JSON.stringify({ status, review_notes: reviewNotes }),
+  }))
+  if (!res.ok) throw new Error('Failed to review feedback')
+  return res.json()
+}
+
+export async function getCflsCorrections(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/corrections`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch corrections')
+  return res.json()
+}
+
+export async function createCorrection(
+  token: string, queryPattern: string, correctedResponse: string,
+  keywords: string, sourceFeedbackId?: number
+) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/corrections`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({
+      query_pattern: queryPattern,
+      corrected_response: correctedResponse,
+      keywords,
+      source_feedback_id: sourceFeedbackId || null,
+    }),
+  }))
+  if (!res.ok) throw new Error('Failed to create correction')
+  return res.json()
+}
+
+export async function deleteCorrection(token: string, correctionId: number) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/corrections/${correctionId}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete correction')
+  return res.json()
+}
+
+export async function getCflsAnalytics(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/cfls/analytics`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch analytics')
+  return res.json()
+}
+
+// ── AI Configuration (Admin only) ────────────────────────────────────────────
+
+export async function getAiMode(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/mode`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch AI mode')
+  return res.json()
+}
+
+export async function setAiMode(token: string, aiMode: string, activeProvider: string = '') {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/mode`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ ai_mode: aiMode, active_provider: activeProvider }),
+  }))
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || 'Failed to set AI mode')
+  }
+  return res.json()
+}
+
+export async function getAiProviders(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch AI providers')
+  return res.json()
+}
+
+export async function getSupportedProviders(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers/supported`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch supported providers')
+  return res.json()
+}
+
+export async function createAiProvider(token: string, data: {
+  provider_name: string, api_key: string, model_name?: string,
+  priority?: number, status?: string, usage_limit?: number
+}) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers`, {
+    method: 'POST', headers: headers(token), body: JSON.stringify(data),
+  }))
+  if (!res.ok) throw new Error('Failed to create provider')
+  return res.json()
+}
+
+export async function updateAiProvider(token: string, providerName: string, data: Record<string, any>) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers/${providerName}`, {
+    method: 'PUT', headers: headers(token), body: JSON.stringify(data),
+  }))
+  if (!res.ok) throw new Error('Failed to update provider')
+  return res.json()
+}
+
+export async function deleteAiProvider(token: string, providerName: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers/${providerName}`, {
+    method: 'DELETE', headers: headers(token),
+  }))
+  if (!res.ok) throw new Error('Failed to delete provider')
+  return res.json()
+}
+
+export async function testAiProvider(token: string, providerName: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/providers/${providerName}/test`, {
+    method: 'POST', headers: headers(token), body: '{}',
+  }))
+  if (!res.ok) throw new Error('Failed to test provider')
+  return res.json()
+}
+
+export async function getAiUsage(token: string, days: number = 7) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/usage?days=${days}`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch AI usage')
+  return res.json()
+}
+
+// ── Model Routing Configuration ──────────────────────────────────────────────
+
+export async function getModelRouting(token: string) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/routing`, { headers: headers(token) }))
+  if (!res.ok) throw new Error('Failed to fetch routing config')
+  return res.json()
+}
+
+export async function setModelRouting(token: string, tier: string, modelName: string, isEnabled: boolean = true) {
+  const res = await handleResponse(await fetch(`${BASE}/ai-config/routing`, {
+    method: 'POST', headers: headers(token),
+    body: JSON.stringify({ tier, model_name: modelName, is_enabled: isEnabled }),
+  }))
+  if (!res.ok) throw new Error('Failed to update routing')
+  return res.json()
+}
+
 // ── Health ──────────────────────────────────────────────────────────────────
 export async function healthCheck() {
   const res = await fetch(`${BASE}/health`)
@@ -381,13 +667,13 @@ export async function disableMfa(token: string, code: string) {
 // ── User Profile ─────────────────────────────────────────────────────────────
 
 export async function getMyProfile(token: string) {
-  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/me`, { headers: headers(token) }))
+  const res = await handleResponse(await fetch(`${BASE}/user/profile`, { headers: headers(token) }))
   if (!res.ok) throw new Error('Failed to fetch profile')
   return res.json()
 }
 
-export async function updateMyProfile(token: string, data: { full_name?: string; email?: string; phone?: string; department?: string }) {
-  const res = await handleResponse(await fetch(`${BASE}/api/v1/users/me`, {
+export async function updateMyProfile(token: string, data: { full_name?: string; email?: string; phone?: string; department?: string; team?: string }) {
+  const res = await handleResponse(await fetch(`${BASE}/user/profile`, {
     method: 'PATCH', headers: headers(token),
     body: JSON.stringify(data),
   }))

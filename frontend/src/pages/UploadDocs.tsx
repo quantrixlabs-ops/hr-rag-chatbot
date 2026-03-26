@@ -52,9 +52,10 @@ export default function UploadDocs({ token, role = '' }: Props) {
   const [docs, setDocs] = useState<DocItem[]>([])
   const [pendingDocs, setPendingDocs] = useState<PendingDoc[]>([])
   const [uploading, setUploading] = useState(false)
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [title, setTitle] = useState('')
   const [category, setCategory] = useState('auto')
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; name: string; results: { name: string; ok: boolean; msg: string }[] }>({ current: 0, total: 0, name: '', results: [] })
   const [deleting, setDeleting] = useState<string | null>(null)
   const [bulkDeleting, setBulkDeleting] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -95,19 +96,41 @@ export default function UploadDocs({ token, role = '' }: Props) {
   const isSomeSelected = selected.size > 0 && selected.size < docs.length
 
   const handleUpload = async () => {
-    if (!file || !title) return
+    if (files.length === 0) return
     setUploading(true)
-    try {
-      await uploadDocument(token, file, title, category, ['employee', 'manager', 'hr_admin'])
-      setFile(null)
-      setTitle('')
-      refreshData(true)
-      refreshPending()
-    } catch (err: any) {
-      alert(err.message || 'Upload failed')
-    } finally {
-      setUploading(false)
+    const results: { name: string; ok: boolean; msg: string }[] = []
+
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i]
+      // Use custom title for single file, or filename-based title for multi
+      const docTitle = files.length === 1 && title.trim()
+        ? title.trim()
+        : f.name.replace(/\.[^/.]+$/, '').replace(/[_-]/g, ' ')
+      setUploadProgress({ current: i + 1, total: files.length, name: f.name, results })
+      try {
+        await uploadDocument(token, f, docTitle, category, ['employee', 'manager', 'hr_admin'])
+        results.push({ name: f.name, ok: true, msg: 'Uploaded' })
+      } catch (err: any) {
+        results.push({ name: f.name, ok: false, msg: err.message || 'Failed' })
+      }
     }
+
+    setUploadProgress({ current: files.length, total: files.length, name: '', results })
+    setFiles([])
+    setTitle('')
+    refreshData(true)
+    refreshPending()
+    setUploading(false)
+
+    // Show summary
+    const ok = results.filter(r => r.ok).length
+    const fail = results.filter(r => !r.ok).length
+    if (fail === 0) {
+      alert(`All ${ok} document(s) uploaded successfully!`)
+    } else {
+      alert(`${ok} uploaded, ${fail} failed:\n${results.filter(r => !r.ok).map(r => `  - ${r.name}: ${r.msg}`).join('\n')}`)
+    }
+    setUploadProgress({ current: 0, total: 0, name: '', results: [] })
   }
 
   const handleDelete = async (docId: string, docTitle: string) => {
@@ -183,33 +206,92 @@ export default function UploadDocs({ token, role = '' }: Props) {
         {/* Upload Form */}
         <div className="bg-white rounded-xl border border-gray-200 p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Upload size={18} /> Upload Document
+            <Upload size={18} /> Upload Documents
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <input type="text" placeholder="Document title" value={title} onChange={e => setTitle(e.target.value)}
-              className="px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
-            <select value={category} onChange={e => setCategory(e.target.value)}
-              className="px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-              <option value="auto">Auto-detect</option>
-              <option value="policy">Policy</option>
-              <option value="handbook">Handbook</option>
-              <option value="benefits">Benefits</option>
-              <option value="leave">Leave</option>
-              <option value="onboarding">Onboarding</option>
-              <option value="legal">Legal</option>
-            </select>
-            <input type="file" accept=".pdf,.docx,.md,.txt" onChange={e => setFile(e.target.files?.[0] || null)}
-              className="text-sm file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100" />
-            <button onClick={handleUpload} disabled={!file || !title || uploading}
-              className="px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 text-sm font-medium transition-colors">
-              {uploading ? 'Uploading...' : 'Upload & Index'}
-            </button>
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {files.length <= 1 && (
+                <input type="text" placeholder="Document title (optional for multiple)" value={title} onChange={e => setTitle(e.target.value)}
+                  className="px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+              )}
+              <select value={category} onChange={e => setCategory(e.target.value)}
+                className="px-4 py-2.5 border border-gray-300 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                <option value="auto">Auto-detect category</option>
+                <option value="policy">Policy</option>
+                <option value="handbook">Handbook</option>
+                <option value="benefits">Benefits</option>
+                <option value="leave">Leave</option>
+                <option value="onboarding">Onboarding</option>
+                <option value="legal">Legal</option>
+              </select>
+              <input type="file" accept=".pdf,.docx,.md,.txt" multiple
+                onChange={e => {
+                  const selected = Array.from(e.target.files || [])
+                  setFiles(selected)
+                  if (selected.length > 1) setTitle('')
+                }}
+                className="text-sm file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100" />
+            </div>
+
+            {/* Selected files preview */}
+            {files.length > 0 && (
+              <div className="bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-medium text-gray-600">{files.length} file(s) selected</p>
+                  <button onClick={() => setFiles([])} className="text-xs text-red-500 hover:text-red-700">Clear all</button>
+                </div>
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {files.map((f, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white rounded px-3 py-1.5 border border-gray-200">
+                      <div className="flex items-center gap-2">
+                        <FileText size={12} className="text-blue-500" />
+                        <span className="text-gray-700">{f.name}</span>
+                      </div>
+                      <span className="text-gray-400">{(f.size / 1024 / 1024).toFixed(1)} MB</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Upload progress */}
+            {uploading && uploadProgress.total > 0 && (
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs font-medium text-blue-700">
+                    Uploading {uploadProgress.current} of {uploadProgress.total}...
+                  </p>
+                  <p className="text-xs text-blue-500">{uploadProgress.name}</p>
+                </div>
+                <div className="w-full h-2 bg-blue-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                    style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }} />
+                </div>
+                {uploadProgress.results.length > 0 && (
+                  <div className="mt-2 space-y-0.5">
+                    {uploadProgress.results.map((r, i) => (
+                      <p key={i} className={`text-[11px] ${r.ok ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {r.ok ? '✓' : '✗'} {r.name}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <button onClick={handleUpload} disabled={files.length === 0 || uploading}
+                className="px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 text-sm font-medium transition-colors flex items-center gap-2">
+                <Upload size={14} />
+                {uploading ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` : files.length > 1 ? `Upload ${files.length} Files` : 'Upload & Index'}
+              </button>
+              {!isHRHead && (
+                <p className="text-xs text-amber-600 flex items-center gap-1">
+                  <Clock size={12} /> Uploads require HR Head approval.
+                </p>
+              )}
+            </div>
           </div>
-          {!isHRHead && (
-            <p className="text-xs text-amber-600 mt-2 flex items-center gap-1">
-              <Clock size={12} /> Documents you upload will require HR Head approval before becoming visible to employees.
-            </p>
-          )}
         </div>
 
         {/* Pending Approvals — HR Head only */}

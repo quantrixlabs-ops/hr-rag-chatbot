@@ -2,9 +2,12 @@ import { useState, useEffect, useCallback } from 'react'
 import {
   getMetrics, getFailedQueries, getSecurityEvents,
   getUsers, getPendingUsers, approveUser, suspendUser,
+  getAiProviders, getSupportedProviders, createAiProvider, updateAiProvider,
+  deleteAiProvider, testAiProvider, getAiUsage, getAiMode, setAiMode,
+  getModelRouting, setModelRouting,
 } from '../services/api'
 import type { AdminMetrics } from '../types/chat'
-import { BarChart3, FileText, AlertTriangle, Clock, Shield, ShieldAlert, XCircle, TrendingUp, Users, CheckCircle, ThumbsDown, RefreshCw, UserCheck, Ban } from 'lucide-react'
+import { BarChart3, FileText, AlertTriangle, Clock, Shield, ShieldAlert, XCircle, TrendingUp, Users, CheckCircle, ThumbsDown, RefreshCw, UserCheck, Ban, Cpu, Plus, Trash2, Zap, Eye, EyeOff, Activity } from 'lucide-react'
 
 interface Props {
   token: string
@@ -31,9 +34,32 @@ export default function AdminDashboard({ token }: Props) {
   const [securityEvents, setSecurityEvents] = useState<any[]>([])
   const [users, setUsers] = useState<any[]>([])
   const [pendingUsers, setPendingUsers] = useState<any[]>([])
-  const [tab, setTab] = useState<'overview' | 'failed' | 'security' | 'users'>('overview')
+  const [tab, setTab] = useState<'overview' | 'failed' | 'security' | 'users' | 'ai'>('overview')
   const [refreshing, setRefreshing] = useState(false)
   const [userFilter, setUserFilter] = useState('')
+  // AI Configuration state
+  const [aiProviders, setAiProviders] = useState<any[]>([])
+  const [supportedProviders, setSupportedProviders] = useState<any[]>([])
+  const [aiUsage, setAiUsage] = useState<any>(null)
+  const [showAddProvider, setShowAddProvider] = useState(false)
+  const [newProvider, setNewProvider] = useState({ provider_name: '', api_key: '', model_name: '', priority: 10, status: 'active', usage_limit: 0 })
+  const [testingProvider, setTestingProvider] = useState('')
+  const [testResult, setTestResult] = useState<any>(null)
+  // AI Mode state
+  const [aiMode, setAiModeState] = useState<any>({ ai_mode: 'internal', active_provider: '', provider_display_name: '', provider_model: '' })
+  const [switchingMode, setSwitchingMode] = useState(false)
+  // Model routing state
+  const [routingConfig, setRoutingConfig] = useState<any[]>([])
+  const [editingTier, setEditingTier] = useState<string | null>(null)
+  const [editModel, setEditModel] = useState('')
+
+  const loadAiData = useCallback(() => {
+    getAiProviders(token).then(d => setAiProviders(d.providers || [])).catch(() => {})
+    getSupportedProviders(token).then(d => setSupportedProviders(d.providers || [])).catch(() => {})
+    getAiUsage(token, 7).then(setAiUsage).catch(() => {})
+    getAiMode(token).then(setAiModeState).catch(() => {})
+    getModelRouting(token).then(d => setRoutingConfig(d.routing || [])).catch(() => {})
+  }, [token])
 
   const refreshData = useCallback(() => {
     setRefreshing(true)
@@ -44,7 +70,8 @@ export default function AdminDashboard({ token }: Props) {
       getUsers(token).then(d => setUsers(d.users || [])).catch(() => {}),
       getPendingUsers(token).then(d => setPendingUsers(d.pending_users || d.users || [])).catch(() => {}),
     ]).finally(() => setRefreshing(false))
-  }, [token])
+    loadAiData()
+  }, [token, loadAiData])
 
   useEffect(() => { refreshData() }, [refreshData])
 
@@ -151,7 +178,7 @@ export default function AdminDashboard({ token }: Props) {
 
         {/* Tab Navigation */}
         <div className="flex gap-1 border-b border-gray-200">
-          {([['overview', 'Overview', BarChart3], ['users', 'User Management', Users], ['failed', 'Failed Queries', XCircle], ['security', 'Security Events', ShieldAlert]] as const).map(([key, label, Icon]) => (
+          {([['overview', 'Overview', BarChart3], ['users', 'User Management', Users], ['failed', 'Failed Queries', XCircle], ['security', 'Security Events', ShieldAlert], ['ai', 'AI Configuration', Cpu]] as const).map(([key, label, Icon]) => (
             <button key={key} onClick={() => setTab(key as any)}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${tab === key ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
               <Icon size={15} /> {label}
@@ -364,6 +391,371 @@ export default function AdminDashboard({ token }: Props) {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {/* AI Configuration Tab */}
+        {tab === 'ai' && (
+          <div className="space-y-6">
+
+            {/* ── AI Mode Selector (Primary Choice) ── */}
+            <div className="bg-white rounded-xl border border-gray-200 p-6">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-1">
+                <Cpu size={20} className="text-violet-600" /> AI Engine Mode
+              </h2>
+              <p className="text-xs text-gray-500 mb-5">Choose which AI engine powers the chatbot.</p>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Option 1: Internal (Ollama) */}
+                <button
+                  onClick={async () => {
+                    if (aiMode.ai_mode === 'internal') return
+                    setSwitchingMode(true)
+                    try {
+                      await setAiMode(token, 'internal')
+                      loadAiData()
+                    } catch (e: any) { alert(e.message) }
+                    setSwitchingMode(false)
+                  }}
+                  disabled={switchingMode}
+                  className={`relative text-left p-5 rounded-xl border-2 transition-all ${
+                    aiMode.ai_mode === 'internal'
+                      ? 'border-emerald-500 bg-emerald-50 ring-2 ring-emerald-200'
+                      : 'border-gray-200 bg-white hover:border-gray-300'
+                  }`}
+                >
+                  {aiMode.ai_mode === 'internal' && (
+                    <span className="absolute top-3 right-3 px-2 py-0.5 text-[10px] font-bold bg-emerald-500 text-white rounded-full">ACTIVE</span>
+                  )}
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${aiMode.ai_mode === 'internal' ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      <Cpu size={20} />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-gray-900">Local AI (Ollama)</p>
+                      <p className="text-xs text-gray-500">llama3:8b — runs on your server</p>
+                    </div>
+                  </div>
+                  <ul className="text-xs text-gray-500 space-y-1 mt-3 ml-1">
+                    <li>No API costs — completely free</li>
+                    <li>Data stays on your server (100% private)</li>
+                    <li>No internet required</li>
+                  </ul>
+                </button>
+
+                {/* Option 2: External API */}
+                <div className={`relative text-left p-5 rounded-xl border-2 transition-all ${
+                  aiMode.ai_mode === 'external'
+                    ? 'border-violet-500 bg-violet-50 ring-2 ring-violet-200'
+                    : 'border-gray-200 bg-white'
+                }`}>
+                  {aiMode.ai_mode === 'external' && (
+                    <span className="absolute top-3 right-3 px-2 py-0.5 text-[10px] font-bold bg-violet-500 text-white rounded-full">ACTIVE</span>
+                  )}
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${aiMode.ai_mode === 'external' ? 'bg-violet-500 text-white' : 'bg-gray-100 text-gray-500'}`}>
+                      <Zap size={20} />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-gray-900">External API</p>
+                      <p className="text-xs text-gray-500">
+                        {aiMode.ai_mode === 'external' && aiMode.provider_display_name
+                          ? `${aiMode.provider_display_name} — ${aiMode.provider_model}`
+                          : 'OpenAI, Claude, Gemini, Groq, etc.'}
+                      </p>
+                    </div>
+                  </div>
+                  <ul className="text-xs text-gray-500 space-y-1 mt-3 ml-1">
+                    <li>More powerful models (GPT-4, Claude, Gemini)</li>
+                    <li>Faster responses for complex queries</li>
+                    <li>Requires API key + internet</li>
+                  </ul>
+
+                  {/* Provider selector — only if providers exist */}
+                  {aiProviders.filter(p => p.status === 'active').length > 0 ? (
+                    <div className="mt-4 pt-3 border-t border-gray-200">
+                      <label className="block text-xs font-medium text-gray-600 mb-1.5">Select AI Provider</label>
+                      <div className="flex gap-2">
+                        <select
+                          value={aiMode.ai_mode === 'external' ? aiMode.active_provider : ''}
+                          onChange={async (e) => {
+                            if (!e.target.value) return
+                            setSwitchingMode(true)
+                            try {
+                              await setAiMode(token, 'external', e.target.value)
+                              loadAiData()
+                            } catch (err: any) { alert(err.message) }
+                            setSwitchingMode(false)
+                          }}
+                          disabled={switchingMode}
+                          className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none bg-white"
+                        >
+                          <option value="">Select provider...</option>
+                          {aiProviders.filter(p => p.status === 'active').map(p => (
+                            <option key={p.provider_name} value={p.provider_name}>
+                              {p.display_name || p.provider_name} ({p.model_name})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-4 pt-3 border-t border-gray-200 text-xs text-amber-600">
+                      Add an API provider below first, then switch to External mode.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {switchingMode && (
+                <p className="text-xs text-violet-600 text-center mt-3 animate-pulse">Switching AI mode...</p>
+              )}
+            </div>
+
+            {/* ── Add Provider Section ── */}
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-semibold text-gray-900">API Providers</h3>
+                <p className="text-xs text-gray-500">Add external AI providers with API keys. Used when External API mode is selected.</p>
+              </div>
+              <button onClick={() => setShowAddProvider(!showAddProvider)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 transition-colors">
+                <Plus size={14} /> Add Provider
+              </button>
+            </div>
+
+            {/* Add Provider Form */}
+            {showAddProvider && (
+              <div className="bg-violet-50 border border-violet-200 rounded-xl p-5 space-y-4">
+                <h3 className="text-sm font-semibold text-violet-800">Add External AI Provider</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Provider</label>
+                    <select value={newProvider.provider_name} onChange={e => setNewProvider(p => ({ ...p, provider_name: e.target.value, model_name: '' }))}
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none">
+                      <option value="">Select provider...</option>
+                      {supportedProviders.map(p => (
+                        <option key={p.name} value={p.name}>{p.display_name} ({p.default_model})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">API Key</label>
+                    <input type="password" value={newProvider.api_key} onChange={e => setNewProvider(p => ({ ...p, api_key: e.target.value }))}
+                      placeholder="sk-... or key-..."
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Model (optional — uses default)</label>
+                    <input type="text" value={newProvider.model_name} onChange={e => setNewProvider(p => ({ ...p, model_name: e.target.value }))}
+                      placeholder={supportedProviders.find(s => s.name === newProvider.provider_name)?.default_model || 'default'}
+                      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Priority (1=highest)</label>
+                      <input type="number" min={1} max={99} value={newProvider.priority} onChange={e => setNewProvider(p => ({ ...p, priority: parseInt(e.target.value) || 10 }))}
+                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Usage Limit (0=unlimited)</label>
+                      <input type="number" min={0} value={newProvider.usage_limit} onChange={e => setNewProvider(p => ({ ...p, usage_limit: parseInt(e.target.value) || 0 }))}
+                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-violet-300 focus:outline-none" />
+                    </div>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button onClick={() => setShowAddProvider(false)} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">Cancel</button>
+                  <button
+                    disabled={!newProvider.provider_name || !newProvider.api_key}
+                    onClick={async () => {
+                      try {
+                        await createAiProvider(token, newProvider)
+                        setShowAddProvider(false)
+                        setNewProvider({ provider_name: '', api_key: '', model_name: '', priority: 10, status: 'active', usage_limit: 0 })
+                        loadAiData()
+                      } catch (e: any) { alert(e.message || 'Failed to add provider') }
+                    }}
+                    className="px-4 py-2 text-sm font-medium bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                    Save Provider
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Configured Providers List */}
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-6 py-3 border-b border-gray-100">
+                <h3 className="text-sm font-semibold text-gray-800">Configured Providers ({aiProviders.length})</h3>
+              </div>
+              {aiProviders.length === 0 ? (
+                <div className="px-6 py-12 text-center">
+                  <Cpu size={32} className="mx-auto text-gray-200 mb-3" />
+                  <p className="text-sm text-gray-400">No external AI providers configured.</p>
+                  <p className="text-xs text-gray-400 mt-1">The system uses internal AI (Ollama) by default. Add an external provider as a fallback.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-100">
+                  {aiProviders.map((p: any) => (
+                    <div key={p.id} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50">
+                      <div className="flex items-center gap-4">
+                        <div className={`w-2.5 h-2.5 rounded-full ${p.status === 'active' ? 'bg-emerald-500' : 'bg-gray-300'}`} />
+                        <div>
+                          <p className="text-sm font-medium text-gray-900">{p.display_name || p.provider_name}</p>
+                          <p className="text-xs text-gray-500">Model: {p.model_name} | Priority: {p.priority} | Usage: {p.usage_count}{p.usage_limit > 0 ? `/${p.usage_limit}` : ''}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {/* Test button */}
+                        <button
+                          disabled={testingProvider === p.provider_name}
+                          onClick={async () => {
+                            setTestingProvider(p.provider_name)
+                            setTestResult(null)
+                            try {
+                              const r = await testAiProvider(token, p.provider_name)
+                              setTestResult(r)
+                            } catch { setTestResult({ status: 'error', error: 'Request failed' }) }
+                            setTestingProvider('')
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-lg hover:bg-violet-100 disabled:opacity-40 transition-colors">
+                          <Zap size={12} /> {testingProvider === p.provider_name ? 'Testing...' : 'Test'}
+                        </button>
+                        {/* Toggle status */}
+                        <button
+                          onClick={async () => {
+                            await updateAiProvider(token, p.provider_name, { status: p.status === 'active' ? 'inactive' : 'active' })
+                            loadAiData()
+                          }}
+                          className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                            p.status === 'active'
+                              ? 'text-amber-700 bg-amber-50 border-amber-200 hover:bg-amber-100'
+                              : 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100'
+                          }`}>
+                          {p.status === 'active' ? <><EyeOff size={12} /> Disable</> : <><Eye size={12} /> Enable</>}
+                        </button>
+                        {/* Delete */}
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Delete ${p.display_name || p.provider_name}? This cannot be undone.`)) return
+                            await deleteAiProvider(token, p.provider_name)
+                            loadAiData()
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100 transition-colors">
+                          <Trash2 size={12} /> Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Test Result Banner */}
+            {testResult && (
+              <div className={`rounded-xl border p-4 ${testResult.status === 'success' ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                <div className="flex items-center gap-2">
+                  {testResult.status === 'success'
+                    ? <CheckCircle size={16} className="text-emerald-600" />
+                    : <XCircle size={16} className="text-red-600" />}
+                  <span className={`text-sm font-medium ${testResult.status === 'success' ? 'text-emerald-800' : 'text-red-800'}`}>
+                    {testResult.status === 'success'
+                      ? `Connected to ${testResult.provider} (${testResult.model}) in ${testResult.latency_ms}ms`
+                      : `Connection failed: ${testResult.error}`}
+                  </span>
+                  <button onClick={() => setTestResult(null)} className="ml-auto text-gray-400 hover:text-gray-600"><XCircle size={14} /></button>
+                </div>
+                {testResult.response_preview && (
+                  <p className="text-xs text-gray-600 mt-2 ml-6">Response: "{testResult.response_preview}"</p>
+                )}
+              </div>
+            )}
+
+            {/* Model Routing — which Ollama model handles which query type */}
+            {aiMode.ai_mode === 'internal' && (
+              <div className="bg-white rounded-xl border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900 mb-1">Model Routing</h3>
+                <p className="text-xs text-gray-500 mb-4">Assign different Ollama models to different query complexity tiers. The system automatically routes each query to the right model.</p>
+                <div className="space-y-3">
+                  {routingConfig.map((r: any) => {
+                    const tierColors: Record<string, string> = {
+                      fast: 'bg-emerald-50 border-emerald-200 text-emerald-700',
+                      standard: 'bg-blue-50 border-blue-200 text-blue-700',
+                      advanced: 'bg-violet-50 border-violet-200 text-violet-700',
+                    }
+                    const tierLabels: Record<string, string> = { fast: 'Fast', standard: 'Standard', advanced: 'Advanced' }
+                    const color = tierColors[r.tier] || 'bg-gray-50 border-gray-200 text-gray-700'
+                    return (
+                      <div key={r.tier} className={`flex items-center justify-between p-3 rounded-lg border ${color}`}>
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold uppercase">{tierLabels[r.tier] || r.tier}</span>
+                            {r.is_default && <span className="text-[10px] text-gray-400">(default)</span>}
+                          </div>
+                          <p className="text-[11px] opacity-70 mt-0.5">{r.description}</p>
+                        </div>
+                        {editingTier === r.tier ? (
+                          <div className="flex items-center gap-2">
+                            <input type="text" value={editModel} onChange={e => setEditModel(e.target.value)}
+                              placeholder="e.g. gemma3:4b"
+                              className="px-2 py-1 text-xs border border-gray-300 rounded-lg w-36 focus:ring-1 focus:ring-blue-500 focus:outline-none" />
+                            <button onClick={async () => {
+                              if (!editModel.trim()) return
+                              try {
+                                await setModelRouting(token, r.tier, editModel.trim())
+                                setEditingTier(null); setEditModel(''); loadAiData()
+                              } catch (e: any) { alert(e.message) }
+                            }} className="px-2 py-1 text-xs bg-blue-600 text-white rounded-lg hover:bg-blue-700">Save</button>
+                            <button onClick={() => { setEditingTier(null); setEditModel('') }}
+                              className="px-2 py-1 text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-mono font-medium">{r.model_name}</span>
+                            <button onClick={() => { setEditingTier(r.tier); setEditModel(r.model_name) }}
+                              className="px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50 rounded-lg transition-colors">
+                              Change
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Usage Analytics */}
+            {aiUsage && aiUsage.providers && aiUsage.providers.length > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200 p-5">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <Activity size={16} className="text-violet-600" /> AI Usage (Last 7 days)
+                </h3>
+                <div className="space-y-3">
+                  {aiUsage.providers.map((p: any, i: number) => (
+                    <div key={i} className="flex items-center justify-between text-sm">
+                      <span className="text-gray-700 font-medium w-40">{p.provider}</span>
+                      <span className="text-gray-500 w-20">{p.total_calls} calls</span>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${p.success_rate >= 90 ? 'bg-emerald-50 text-emerald-700' : p.success_rate >= 50 ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700'}`}>
+                        {p.success_rate}% success
+                      </span>
+                      <span className="text-gray-400 text-xs w-28 text-right">{p.avg_latency_ms}ms avg</span>
+                      <span className="text-gray-400 text-xs w-32 text-right">{(p.total_prompt_tokens + p.total_completion_tokens).toLocaleString()} tokens</span>
+                    </div>
+                  ))}
+                </div>
+                {aiUsage.recent_errors && aiUsage.recent_errors.length > 0 && (
+                  <div className="mt-4 pt-3 border-t border-gray-100">
+                    <p className="text-xs font-medium text-red-600 mb-2">Recent Errors</p>
+                    {aiUsage.recent_errors.slice(0, 5).map((e: any, i: number) => (
+                      <p key={i} className="text-xs text-gray-500 mb-1">
+                        <span className="font-mono text-red-500">{e.provider}</span>: {e.error}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

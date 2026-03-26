@@ -18,7 +18,8 @@ from backend.app.core.config import get_settings
 logger = structlog.get_logger()
 
 # Minimum similarity score to consider an FAQ match
-FAQ_MATCH_THRESHOLD = 0.45
+# 0.55 prevents cross-topic false matches (e.g. "harassment policy" matching "leave policy")
+FAQ_MATCH_THRESHOLD = 0.55
 
 
 def _normalize(text: str) -> str:

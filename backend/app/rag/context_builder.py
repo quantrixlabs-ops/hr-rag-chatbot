@@ -12,8 +12,10 @@ from __future__ import annotations
 from backend.app.models.document_models import SearchResult
 from backend.app.models.session_models import ConversationTurn
 
-# Chunks below this score are likely irrelevant noise
-MIN_RELEVANCE_SCORE = 0.35
+# Chunks below this score are filtered out.
+# Cross-encoder sigmoid scores: 0.0-0.3 = irrelevant, 0.3-0.6 = moderate, 0.6+ = highly relevant
+# Set low enough to not filter out moderately relevant chunks that the LLM needs
+MIN_RELEVANCE_SCORE = 0.05
 
 
 class ContextBuilder:
@@ -51,7 +53,7 @@ class ContextBuilder:
             header = f"[Document {doc_num} | Source: {c.source}"
             if c.page:
                 header += f", Page {c.page}"
-            header += f" | Relevance: {c.score:.0%}]"
+            header += "]"
             parts.append(f"{header}\n{c.text.strip()}")
             tokens += ct
 

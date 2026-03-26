@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     rerank_top_n: int = 8
     final_context_chunks: int = 5
     max_context_tokens: int = 3000
-    llm_temperature: float = 0.1
+    llm_temperature: float = 0.0
     max_response_tokens: int = 1024
     verify_grounding: bool = True
     min_faithfulness_score: float = 0.7
@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     session_inactivity_minutes: int = 30  # Frontend idle timeout
     data_retention_days: int = 365  # How long to keep logs/audit trails
     encryption_key: str = ""  # Fernet key for data-at-rest encryption (generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+    # ── Email / SMTP (Phase 2: OTP password reset) ────────────────────────
+    smtp_host: str = ""           # e.g. "smtp.gmail.com" — empty = email OTP disabled
+    smtp_port: int = 587
+    smtp_user: str = ""           # e.g. "noreply@company.com"
+    smtp_password: str = ""
+    smtp_from_name: str = "HR Chatbot"
+    smtp_use_tls: bool = True
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

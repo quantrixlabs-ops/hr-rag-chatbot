@@ -1,17 +1,28 @@
 """User self-service endpoints — GDPR compliance (Phase B)."""
 
+import html as _html
 import json
 import sqlite3
 import time
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from backend.app.core.config import get_settings
 from backend.app.core.security import (
     get_current_user, hash_password, log_security_event, revoke_all_user_refresh_tokens,
 )
 from backend.app.models.chat_models import User
+
+
+class UpdateProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    department: Optional[str] = None
+    team: Optional[str] = None
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -22,23 +33,86 @@ async def get_profile(user: User = Depends(get_current_user)):
     s = get_settings()
     with sqlite3.connect(s.db_path) as con:
         row = con.execute(
-            "SELECT username, role, department, full_name, email, phone, created_at, tenant_id "
+            "SELECT username, role, department, full_name, email, phone, created_at, tenant_id, "
+            "COALESCE(employee_id,''), COALESCE(branch_id,''), COALESCE(team,''), "
+            "COALESCE(totp_enabled,0) "
             "FROM users WHERE user_id=?",
             (user.user_id,),
         ).fetchone()
     if not row:
         raise HTTPException(404, "User not found")
+
+    # Resolve branch name if branch_id exists
+    branch_name = ""
+    if row[9]:
+        with sqlite3.connect(s.db_path) as con:
+            br = con.execute("SELECT name FROM branches WHERE branch_id=?", (row[9],)).fetchone()
+            if br:
+                branch_name = br[0]
+
     return {
         "user_id": user.user_id,
         "username": row[0],
         "role": row[1],
-        "department": row[2],
-        "full_name": row[3],
-        "email": row[4],
-        "phone": row[5],
+        "department": row[2] or "",
+        "full_name": row[3] or "",
+        "email": row[4] or "",
+        "phone": row[5] or "",
         "created_at": row[6],
         "tenant_id": row[7],
+        "employee_id": row[8],
+        "branch_id": row[9],
+        "branch_name": branch_name,
+        "team": row[10],
+        "totp_enabled": bool(row[11]),
     }
+
+
+@router.patch("/profile")
+async def update_profile(req: UpdateProfileRequest, user: User = Depends(get_current_user)):
+    """Update editable profile fields. Role, employee_id, and username are read-only."""
+    s = get_settings()
+    now = time.time()
+
+    updates = []
+    params: list = []
+
+    if req.full_name is not None:
+        updates.append("full_name = ?")
+        params.append(_html.escape(req.full_name.strip(), quote=True)[:100])
+    if req.email is not None:
+        updates.append("email = ?")
+        params.append(req.email.strip()[:254])
+    if req.phone is not None:
+        updates.append("phone = ?")
+        params.append(req.phone.strip()[:20])
+    if req.department is not None:
+        updates.append("department = ?")
+        params.append(_html.escape(req.department.strip(), quote=True)[:100])
+    if req.team is not None:
+        updates.append("team = ?")
+        params.append(_html.escape(req.team.strip(), quote=True)[:100])
+
+    if not updates:
+        raise HTTPException(400, "No fields to update")
+
+    params.append(user.user_id)
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?", params)
+
+    log_security_event("profile_updated", {"fields": len(updates)}, user_id=user.user_id)
+    return {"status": "updated", "message": "Profile updated successfully."}
+
+
+# Aliases: /users/me → /user/profile (frontend compatibility)
+@router.get("/me", include_in_schema=False)
+async def get_profile_alias(user: User = Depends(get_current_user)):
+    return await get_profile(user)
+
+
+@router.patch("/me", include_in_schema=False)
+async def update_profile_alias(req: UpdateProfileRequest, user: User = Depends(get_current_user)):
+    return await update_profile(req, user)
 
 
 @router.get("/data/export")

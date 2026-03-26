@@ -1,6 +1,6 @@
 import ChatWindow from '../components/ChatWindow'
 import { useChat } from '../hooks/useChat'
-import { sendFeedback, getSessionHistory, createTicket } from '../services/api'
+import { sendFeedback, sendDetailedFeedback, getSessionHistory, escalateToHR } from '../services/api'
 import { useEffect, useState } from 'react'
 import type { ChatMessage } from '../types/chat'
 
@@ -44,26 +44,28 @@ export default function ChatPage({ token, sessionId, onSessionChange, role, onNa
   const handleFeedback = (query: string, answer: string, rating: string) => {
     if (chat.sessionId) {
       sendFeedback(token, chat.sessionId, query, answer, rating)
-      // Track which messages got feedback
       setFeedbackGiven(prev => ({ ...prev, [query.slice(0, 50)]: rating }))
     }
   }
 
+  const handleDetailedFeedback = (query: string, answer: string, issueCategory: string, comment: string) => {
+    if (chat.sessionId) {
+      sendDetailedFeedback(token, chat.sessionId, query, answer, 'negative', issueCategory, comment)
+    }
+  }
+
   const handleEscalate = async (query: string, answer: string) => {
+    const reason = prompt('Why are you escalating? (optional)')
     try {
-      // Create a ticket directly with the chat context
-      await createTicket(token, {
-        title: `Escalation: ${query.slice(0, 150)}`,
-        description: `Employee escalated from chat.\n\nQuestion: ${query}\n\nAI Response: ${answer.slice(0, 500)}`,
-        category: 'general',
-        priority: 'high',
-      })
-      // Navigate to tickets page so employee can see and track it
+      // Build chat history from current messages
+      const history = chat.messages.map(m => ({ role: m.role, content: m.content }))
+      await escalateToHR(token, query, answer, chat.sessionId, reason || '', history)
+      // Navigate to tickets page so employee can track the escalation
       if (onNavigate) {
         onNavigate('tickets')
       }
     } catch {
-      alert('Failed to create ticket. Please try again or go to Tickets page directly.')
+      alert('Failed to escalate. Please try again or go to Tickets page directly.')
     }
   }
 
@@ -74,6 +76,7 @@ export default function ChatPage({ token, sessionId, onSessionChange, role, onNa
       streamingText={chat.streamingText}
       onSend={chat.send}
       onFeedback={handleFeedback}
+      onDetailedFeedback={handleDetailedFeedback}
       onEscalate={handleEscalate}
       token={token}
       role={role}

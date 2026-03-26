@@ -611,3 +611,327 @@ async def ticket_stats(user: User = Depends(get_current_user)):
         "by_status": status_counts,
         "by_priority": priority_counts,
     }
+
+
+# ── Escalation-specific endpoints ─────────────────────────────────────────────
+
+
+class EscalateFromChatRequest(BaseModel):
+    """Employee escalates from chatbot — captures full context."""
+    query: str
+    answer: str = ""
+    session_id: Optional[str] = None
+    reason: str = ""
+    chat_history: Optional[list] = None  # [{role, content}]
+
+
+class HRRespondRequest(BaseModel):
+    """HR writes or edits a response to an escalation. NEVER auto-sent."""
+    hr_response: str
+    resolve: bool = True  # True = resolve ticket after responding
+
+
+@router.post("/escalate", status_code=201)
+async def escalate_from_chat(
+    req: EscalateFromChatRequest,
+    user: User = Depends(get_current_user),
+):
+    """Employee escalates a chatbot conversation to HR.
+
+    Creates an escalation ticket with:
+    - Full chat history (for HR context)
+    - AI-generated draft suggestion (INTERNAL ONLY — never sent to employee)
+    - Escalation reason
+    """
+    import html as _html
+    import json as _json
+
+    s = get_settings()
+    ticket_id = str(uuid.uuid4())
+    now = time.time()
+
+    # Sanitize inputs
+    query = _html.escape(req.query.strip()[:2000], quote=True)
+    answer = _html.escape(req.answer.strip()[:2000], quote=True)
+    reason = _html.escape(req.reason.strip()[:500], quote=True) if req.reason else "Employee needs further HR assistance"
+
+    # Build chat history JSON from session if available
+    chat_history_json = ""
+    if req.chat_history:
+        # Sanitize each turn
+        safe_history = []
+        for turn in req.chat_history[:20]:  # Cap at 20 turns
+            safe_history.append({
+                "role": str(turn.get("role", ""))[:10],
+                "content": _html.escape(str(turn.get("content", ""))[:1000], quote=True),
+            })
+        chat_history_json = _json.dumps(safe_history)
+    elif req.session_id:
+        # Fetch from session store
+        try:
+            with sqlite3.connect(s.db_path) as con:
+                turns = con.execute(
+                    "SELECT role, content FROM turns WHERE session_id=? ORDER BY timestamp ASC LIMIT 20",
+                    (req.session_id,),
+                ).fetchall()
+                if turns:
+                    chat_history_json = _json.dumps([
+                        {"role": t[0], "content": t[1][:1000]} for t in turns
+                    ])
+        except Exception:
+            pass
+
+    # Generate AI suggestion (INTERNAL ONLY — for HR reference, never sent to employee)
+    ai_suggestion = ""
+    try:
+        from backend.app.core.dependencies import get_registry
+        reg = get_registry()
+        llm = reg.get("model_gateway")
+        if llm:
+            suggestion_prompt = (
+                "You are an HR expert assistant. An employee asked the following question "
+                "and was not satisfied with the automated response. Draft a helpful, "
+                "accurate answer for the HR team to review and edit before sending.\n\n"
+                f"Employee question: {req.query}\n"
+                f"Previous AI response: {req.answer}\n"
+                f"Employee's concern: {reason}\n\n"
+                "Draft a professional HR response (the HR team will review and edit this before sending):"
+            )
+            resp = llm.generate(suggestion_prompt, s.llm_model, 0.0, 512)
+            ai_suggestion = resp.text.strip()[:2000]
+    except Exception:
+        ai_suggestion = "(Could not generate suggestion — HR will write response from scratch)"
+
+    title = f"Escalation: {req.query[:120]}"
+
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "INSERT INTO tickets (ticket_id, title, description, category, priority, "
+            "status, raised_by, created_at, updated_at, "
+            "is_escalation, escalation_reason, chat_history, ai_suggestion) "
+            "VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?)",
+            (ticket_id, title,
+             f"Employee question: {query}\n\nPrevious AI response: {answer}",
+             "general", "high", "raised", user.user_id, now, now,
+             1, reason, chat_history_json, ai_suggestion),
+        )
+        con.execute(
+            "INSERT INTO ticket_history (ticket_id, action, performed_by, new_value, comment, timestamp) "
+            "VALUES (?,?,?,?,?,?)",
+            (ticket_id, "escalated", user.user_id, "raised",
+             f"Escalated from chatbot. Reason: {reason}", now),
+        )
+
+    log_security_event("escalation_created", {
+        "ticket_id": ticket_id, "query": req.query[:80], "reason": reason[:80],
+    }, user_id=user.user_id)
+
+    # Notify HR Head
+    try:
+        from backend.app.api.notification_routes import notify_role
+        notify_role("hr_head",
+                    f"Escalation from employee: {req.query[:60]}",
+                    f"Reason: {reason[:100]}. AI draft suggestion available.",
+                    "action", f"/tickets/{ticket_id}", s.db_path)
+        notify_role("hr_team",
+                    f"New escalation: {req.query[:60]}",
+                    f"Priority: high | Reason: {reason[:100]}",
+                    "action", f"/tickets/{ticket_id}", s.db_path)
+    except Exception:
+        pass
+
+    return {
+        "status": "escalated",
+        "ticket_id": ticket_id,
+        "message": "Your question has been escalated to HR. You will receive a personal response shortly.",
+    }
+
+
+@router.get("/escalations/list")
+async def list_escalations(
+    status: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """List escalated tickets. HR roles only."""
+    if user.role not in _HR_ROLES:
+        raise HTTPException(403, "HR roles only")
+
+    s = get_settings()
+    _auto_close_resolved(s.db_path)
+
+    conditions = ["t.is_escalation = 1"]
+    params: list = []
+    if status and status in VALID_STATUSES:
+        conditions.append("t.status = ?")
+        params.append(status)
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    with sqlite3.connect(s.db_path) as con:
+        rows = con.execute(
+            f"SELECT t.ticket_id, t.title, t.description, t.status, t.priority, "
+            f"t.raised_by, t.assigned_to, t.created_at, t.updated_at, "
+            f"t.escalation_reason, t.ai_suggestion, t.hr_response, "
+            f"COALESCE(u.full_name, u.username, t.raised_by), "
+            f"COALESCE(a.full_name, a.username, '') "
+            f"FROM tickets t "
+            f"LEFT JOIN users u ON t.raised_by = u.user_id "
+            f"LEFT JOIN users a ON t.assigned_to = a.user_id "
+            f"{where} ORDER BY t.created_at DESC LIMIT 100",
+            params,
+        ).fetchall()
+
+    return {
+        "escalations": [{
+            "ticket_id": r[0], "title": r[1], "description": r[2],
+            "status": r[3], "priority": r[4],
+            "raised_by": r[5], "assigned_to": r[6],
+            "created_at": r[7], "updated_at": r[8],
+            "escalation_reason": r[9], "ai_suggestion": r[10],
+            "hr_response": r[11] or "", "raised_by_name": r[12],
+            "assigned_to_name": r[13],
+        } for r in rows],
+        "total": len(rows),
+    }
+
+
+@router.get("/{ticket_id}/escalation-detail")
+async def get_escalation_detail(
+    ticket_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Get full escalation detail including chat history and AI suggestion.
+    HR sees everything; employee sees only their query and HR response (no AI suggestion).
+    """
+    import json as _json
+    s = get_settings()
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT t.ticket_id, t.title, t.description, t.status, t.priority, "
+            "t.raised_by, t.assigned_to, t.created_at, t.updated_at, "
+            "t.escalation_reason, t.chat_history, t.ai_suggestion, t.hr_response, "
+            "t.is_escalation, t.feedback, t.rating "
+            "FROM tickets t WHERE t.ticket_id = ?",
+            (ticket_id,),
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(404, "Ticket not found")
+
+    is_hr = user.role in _HR_ROLES
+    is_owner = row[5] == user.user_id
+
+    if not is_hr and not is_owner:
+        raise HTTPException(403, "Access denied")
+
+    # Parse chat history
+    chat_history = []
+    if row[10]:
+        try:
+            chat_history = _json.loads(row[10])
+        except Exception:
+            pass
+
+    result = {
+        "ticket_id": row[0], "title": row[1], "description": row[2],
+        "status": row[3], "priority": row[4],
+        "raised_by": row[5], "assigned_to": row[6],
+        "created_at": row[7], "updated_at": row[8],
+        "escalation_reason": row[9],
+        "is_escalation": bool(row[13]),
+        "hr_response": row[12] or "",
+        "feedback": row[14] or "", "rating": row[15] or 0,
+    }
+
+    if is_hr:
+        # HR sees everything: chat history + AI suggestion (internal)
+        result["chat_history"] = chat_history
+        result["ai_suggestion"] = row[11] or ""
+    else:
+        # Employee sees chat history but NOT the AI suggestion
+        result["chat_history"] = chat_history
+
+    return result
+
+
+@router.post("/{ticket_id}/hr-respond")
+async def hr_respond_to_escalation(
+    ticket_id: str,
+    req: HRRespondRequest,
+    user: User = Depends(get_current_user),
+):
+    """HR writes a response to an escalated ticket.
+
+    CRITICAL SAFETY RULE: This is the ONLY way a response reaches the employee.
+    AI suggestions are internal-only — HR must write/edit and explicitly send.
+    """
+    if user.role not in _HR_ROLES:
+        raise HTTPException(403, "Only HR team can respond to escalations")
+
+    if not req.hr_response.strip():
+        raise HTTPException(400, "Response cannot be empty")
+
+    import html as _html
+    s = get_settings()
+    now = time.time()
+    hr_response = _html.escape(req.hr_response.strip()[:5000], quote=True)
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT status, raised_by, title, is_escalation FROM tickets WHERE ticket_id=?",
+            (ticket_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Ticket not found")
+
+        # Store HR response
+        con.execute(
+            "UPDATE tickets SET hr_response=?, assigned_to=?, updated_at=? WHERE ticket_id=?",
+            (hr_response, user.user_id, now, ticket_id),
+        )
+
+        # Record in history
+        con.execute(
+            "INSERT INTO ticket_history (ticket_id, action, performed_by, new_value, comment, timestamp) "
+            "VALUES (?,?,?,?,?,?)",
+            (ticket_id, "hr_response", user.user_id, "",
+             f"HR Response: {hr_response[:200]}...", now),
+        )
+
+        # Optionally resolve the ticket
+        if req.resolve and row[0] in ("raised", "assigned", "in_progress"):
+            auto_close = _add_working_days(now, AUTO_CLOSE_WORKING_DAYS)
+            con.execute(
+                "UPDATE tickets SET status='resolved', resolved_at=?, auto_close_at=?, updated_at=? "
+                "WHERE ticket_id=?",
+                (now, auto_close, now, ticket_id),
+            )
+            con.execute(
+                "INSERT INTO ticket_history (ticket_id, action, performed_by, old_value, new_value, comment, timestamp) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ticket_id, "status_change", user.user_id, row[0], "resolved",
+                 "HR responded and resolved the escalation", now),
+            )
+
+    # Notify the employee — they get notified that HR has responded
+    try:
+        from backend.app.api.notification_routes import create_notification
+        create_notification(
+            row[1], f"HR responded to your escalation",
+            f"Your question has been answered by HR: {row[2][:80]}",
+            "success", f"/tickets/{ticket_id}", s.db_path,
+        )
+    except Exception:
+        pass
+
+    log_security_event("hr_escalation_response", {
+        "ticket_id": ticket_id, "responded_by": user.user_id,
+        "resolved": req.resolve,
+    }, user_id=user.user_id)
+
+    return {
+        "status": "responded",
+        "ticket_id": ticket_id,
+        "resolved": req.resolve,
+    }

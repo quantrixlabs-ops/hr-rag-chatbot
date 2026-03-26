@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink, AlertCircle, AlertTriangle, Brain, Copy, Check } from 'lucide-react'
+import { ThumbsUp, ThumbsDown, FileText, Shield, ExternalLink, AlertCircle, AlertTriangle, Brain, Copy, Check, X, Send } from 'lucide-react'
 import type { ChatMessage, Citation } from '../types/chat'
 
 interface Props {
   message: ChatMessage
   onFeedback?: (rating: string) => void
+  onDetailedFeedback?: (issueCategory: string, comment: string) => void
   givenFeedback?: string  // 'positive' | 'negative' | undefined
   onSuggestedClick?: (question: string) => void
   onCitationClick?: (citation: Citation) => void
@@ -151,13 +152,32 @@ function cleanExcerpt(text: string): string {
     .trim()
 }
 
-export default function MessageBubble({ message, onFeedback, givenFeedback, onSuggestedClick, onCitationClick, onEscalate }: Props) {
+export default function MessageBubble({ message, onFeedback, onDetailedFeedback, givenFeedback, onSuggestedClick, onCitationClick, onEscalate }: Props) {
   const isUser = message.role === 'user'
   const [copied, setCopied] = useState(false)
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false)
+  const [feedbackCategory, setFeedbackCategory] = useState('')
+  const [feedbackComment, setFeedbackComment] = useState('')
 
   const confidence = message.confidence ?? message.faithfulness_score ?? 0
   const hasContent = !isUser && message.content && message.content.length > 0
-  const showConfidence = hasContent && confidence > 0
+
+  const handleNegativeFeedback = () => {
+    // Show detailed feedback modal instead of immediate submit
+    setShowFeedbackModal(true)
+  }
+
+  const handleSubmitDetailedFeedback = () => {
+    if (onDetailedFeedback) {
+      onDetailedFeedback(feedbackCategory, feedbackComment)
+    }
+    if (onFeedback) {
+      onFeedback('negative')
+    }
+    setShowFeedbackModal(false)
+    setFeedbackCategory('')
+    setFeedbackComment('')
+  }
 
   const handleCopy = () => {
     // Strip markdown formatting for clipboard
@@ -268,7 +288,7 @@ export default function MessageBubble({ message, onFeedback, givenFeedback, onSu
                       <button onClick={() => onFeedback('positive')} className="p-1.5 hover:bg-emerald-50 rounded-lg transition-colors" title="Helpful">
                         <ThumbsUp size={13} className="text-gray-300 hover:text-emerald-500" />
                       </button>
-                      <button onClick={() => onFeedback('negative')} className="p-1.5 hover:bg-red-50 rounded-lg transition-colors" title="Not helpful">
+                      <button onClick={handleNegativeFeedback} className="p-1.5 hover:bg-red-50 rounded-lg transition-colors" title="Not helpful">
                         <ThumbsDown size={13} className="text-gray-300 hover:text-red-500" />
                       </button>
                     </>
@@ -277,7 +297,7 @@ export default function MessageBubble({ message, onFeedback, givenFeedback, onSu
                     <span className="flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px]">
                       {givenFeedback === 'positive'
                         ? <><ThumbsUp size={12} className="text-emerald-500" /> <span className="text-emerald-600">Thanks!</span></>
-                        : <><ThumbsDown size={12} className="text-red-400" /> <span className="text-red-500">Noted</span></>
+                        : <><ThumbsDown size={12} className="text-red-400" /> <span className="text-red-500">Feedback sent</span></>
                       }
                     </span>
                   )}
@@ -306,6 +326,61 @@ export default function MessageBubble({ message, onFeedback, givenFeedback, onSu
           </div>
         </div>
       </div>
+
+      {/* ── Detailed Feedback Modal ── */}
+      {showFeedbackModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+             onClick={() => setShowFeedbackModal(false)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-5"
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-gray-900">What went wrong?</h3>
+              <button onClick={() => setShowFeedbackModal(false)} className="p-1 hover:bg-gray-100 rounded-lg">
+                <X size={16} className="text-gray-400" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              {[
+                { value: 'incorrect', label: 'Incorrect answer' },
+                { value: 'incomplete', label: 'Incomplete answer' },
+                { value: 'not_relevant', label: 'Not relevant' },
+                { value: 'other', label: 'Other issue' },
+              ].map(opt => (
+                <button key={opt.value}
+                  onClick={() => setFeedbackCategory(opt.value)}
+                  className={`text-xs px-3 py-2 rounded-lg border transition-colors ${
+                    feedbackCategory === opt.value
+                      ? 'bg-red-50 border-red-300 text-red-700 font-medium'
+                      : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
+                  }`}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <textarea
+              value={feedbackComment}
+              onChange={e => setFeedbackComment(e.target.value)}
+              placeholder="Tell us more (optional)..."
+              className="w-full text-sm border border-gray-200 rounded-lg p-3 resize-none focus:ring-2 focus:ring-red-200 focus:border-red-300 outline-none"
+              rows={3}
+            />
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setShowFeedbackModal(false)}
+                className="text-xs px-4 py-2 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleSubmitDetailedFeedback}
+                disabled={!feedbackCategory}
+                className="text-xs px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5">
+                <Send size={12} /> Submit Feedback
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

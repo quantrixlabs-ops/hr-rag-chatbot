@@ -88,6 +88,8 @@ class RegisterRequest(BaseModel):
     phone: str = ""
     role: str = "employee"  # Requested role — validated against SELF_REGISTER_ROLES
     department: Optional[str] = None
+    secret_question: str = ""
+    secret_answer: str = ""
 
 
 def _validate_username(username: str) -> str:
@@ -231,14 +233,20 @@ async def register(req: RegisterRequest, request: Request):
     full_name = _html.escape(req.full_name.strip(), quote=True)[:100]
     email = req.email.strip()[:254]
     phone = req.phone.strip()[:20]
+    # Hash secret answer (like password — never store plain text)
+    secret_q = _html.escape(req.secret_question.strip(), quote=True)[:200] if req.secret_question else ""
+    secret_a_hash = hash_password(req.secret_answer.strip().lower()) if req.secret_answer.strip() else ""
+
     try:
         with sqlite3.connect(s.db_path) as con:
             con.execute(
                 "INSERT INTO users (user_id,username,hashed_password,role,department,created_at,"
-                "full_name,email,phone,status,verification_token,requested_role) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "full_name,email,phone,status,verification_token,requested_role,"
+                "secret_question,secret_answer_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (uid, username, hash_password(req.password), role, req.department, time.time(),
-                 full_name, email, phone, status, verification_token, requested_role))
+                 full_name, email, phone, status, verification_token, requested_role,
+                 secret_q, secret_a_hash))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Username already exists")
     log_security_event("user_registered", {
@@ -499,3 +507,359 @@ async def sso_callback(request: Request):
     frontend_url = f"http://localhost:3000/auth/sso/complete?access_token={access_token}&refresh_token={refresh_token}&tenant={tenant_slug}"
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=frontend_url)
+
+
+# ── Forgot Password (Secret Question) ────────────────────────────────────────
+
+# Rate limiting for forgot password attempts
+_forgot_attempts: dict[str, list[float]] = defaultdict(list)
+FORGOT_MAX_ATTEMPTS = 3
+FORGOT_COOLDOWN_SECONDS = 300  # 5-minute cooldown after 3 failures
+
+
+class ForgotPasswordRequest(BaseModel):
+    username: str
+
+
+class VerifySecretRequest(BaseModel):
+    username: str
+    secret_answer: str
+
+
+class ResetPasswordRequest(BaseModel):
+    username: str
+    secret_answer: str
+    new_password: str
+
+
+@router.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest, request: Request):
+    """Step 1: Get the secret question for a username."""
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(400, "Username is required")
+
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"forgot:{client_ip}"
+    now = time.time()
+
+    # Rate limiting
+    _forgot_attempts[key] = [t for t in _forgot_attempts[key] if now - t < FORGOT_COOLDOWN_SECONDS]
+    if len(_forgot_attempts[key]) >= FORGOT_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many attempts. Please try again in 5 minutes.")
+
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT secret_question FROM users WHERE username = ?", (username,)
+        ).fetchone()
+
+    if not row or not row[0]:
+        # Don't reveal whether username exists — return generic message
+        return {"has_question": False, "message": "No security question found. Please contact HR to reset your password."}
+
+    return {"has_question": True, "secret_question": row[0]}
+
+
+@router.post("/verify-secret")
+async def verify_secret_answer(req: VerifySecretRequest, request: Request):
+    """Step 2: Verify the secret answer."""
+    username = req.username.strip()
+    answer = req.secret_answer.strip().lower()
+
+    if not username or not answer:
+        raise HTTPException(400, "Username and answer are required")
+
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"forgot:{client_ip}"
+    now = time.time()
+
+    # Rate limiting
+    _forgot_attempts[key] = [t for t in _forgot_attempts[key] if now - t < FORGOT_COOLDOWN_SECONDS]
+    if len(_forgot_attempts[key]) >= FORGOT_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many attempts. Please try again in 5 minutes.")
+
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT secret_answer_hash FROM users WHERE username = ?", (username,)
+        ).fetchone()
+
+    if not row or not row[0]:
+        _forgot_attempts[key].append(now)
+        raise HTTPException(400, "Verification failed. Please try again or contact HR.")
+
+    if not verify_password(answer, row[0]):
+        _forgot_attempts[key].append(now)
+        remaining = FORGOT_MAX_ATTEMPTS - len(_forgot_attempts[key])
+        log_security_event("forgot_password_failed", {"username": username, "remaining": remaining},
+                           ip_address=client_ip)
+        if remaining <= 0:
+            raise HTTPException(429, "Too many failed attempts. Please try again in 5 minutes.")
+        raise HTTPException(400, f"Incorrect answer. {remaining} attempt(s) remaining.")
+
+    # Generate a short-lived reset token
+    reset_token = str(uuid.uuid4())
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "UPDATE users SET verification_token = ? WHERE username = ?",
+            (f"RESET:{reset_token}", username),
+        )
+
+    log_security_event("forgot_password_verified", {"username": username}, ip_address=client_ip)
+    return {"verified": True, "reset_token": reset_token}
+
+
+@router.post("/reset-password")
+async def reset_password(req: ResetPasswordRequest, request: Request):
+    """Step 3: Reset password after secret answer verification."""
+    username = req.username.strip()
+    answer = req.secret_answer.strip().lower()
+
+    if not username or not answer or not req.new_password:
+        raise HTTPException(400, "All fields are required")
+
+    _validate_password(req.new_password)
+
+    client_ip = request.client.host if request.client else "unknown"
+    s = get_settings()
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT user_id, secret_answer_hash FROM users WHERE username = ?", (username,)
+        ).fetchone()
+
+    if not row or not row[1]:
+        raise HTTPException(400, "Password reset failed. Please try again.")
+
+    # Re-verify the secret answer (defense in depth)
+    if not verify_password(answer, row[1]):
+        raise HTTPException(400, "Verification failed.")
+
+    # Update password
+    new_hash = hash_password(req.new_password)
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "UPDATE users SET hashed_password = ?, verification_token = '' WHERE username = ?",
+            (new_hash, username),
+        )
+
+    # Revoke all existing tokens for security
+    revoke_all_user_refresh_tokens(row[0])
+
+    log_security_event("password_reset_success", {"username": username}, user_id=row[0], ip_address=client_ip)
+    return {"status": "success", "message": "Password has been reset successfully. Please log in with your new password."}
+
+
+@router.post("/change-password")
+async def change_password_authenticated(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """Change password for authenticated user (from Settings page)."""
+    import json as _json
+    body = _json.loads(await request.body())
+    current_password = body.get("current_password", "")
+    new_password = body.get("new_password", "")
+
+    if not current_password or not new_password:
+        raise HTTPException(400, "Current and new passwords are required")
+
+    _validate_password(new_password)
+
+    token = credentials.credentials
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(401, "Invalid token")
+
+    user_id = payload.get("sub")
+    s = get_settings()
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT hashed_password FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+
+    if not row or not verify_password(current_password, row[0]):
+        raise HTTPException(400, "Current password is incorrect")
+
+    new_hash = hash_password(new_password)
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "UPDATE users SET hashed_password = ? WHERE user_id = ?",
+            (new_hash, user_id),
+        )
+
+    log_security_event("password_changed", {}, user_id=user_id)
+    return {"status": "success", "message": "Password changed successfully."}
+
+
+# ── Phase 2: Email OTP Password Reset ─────────────────────────────────────────
+
+_otp_attempts: dict[str, list[float]] = defaultdict(list)
+OTP_MAX_ATTEMPTS = 3
+OTP_COOLDOWN_SECONDS = 300
+
+
+class RequestOtpRequest(BaseModel):
+    username: str
+
+
+class VerifyOtpRequest(BaseModel):
+    username: str
+    otp_code: str
+
+
+class ResetWithOtpRequest(BaseModel):
+    username: str
+    otp_code: str
+    new_password: str
+
+
+@router.get("/email-reset-available")
+async def check_email_reset_available():
+    """Check if email OTP reset is configured on this server."""
+    from backend.app.services.email_service import is_email_configured
+    return {"available": is_email_configured()}
+
+
+@router.post("/request-otp")
+async def request_email_otp(req: RequestOtpRequest, request: Request):
+    """Send a 6-digit OTP to the user's registered email for password reset."""
+    from backend.app.services.email_service import (
+        is_email_configured, generate_otp, send_otp_email, store_otp,
+    )
+
+    if not is_email_configured():
+        raise HTTPException(503, "Email reset is not configured on this server.")
+
+    username = req.username.strip()
+    if not username:
+        raise HTTPException(400, "Username is required")
+
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"otp:{client_ip}"
+    now = time.time()
+
+    # Rate limiting
+    _otp_attempts[key] = [t for t in _otp_attempts[key] if now - t < OTP_COOLDOWN_SECONDS]
+    if len(_otp_attempts[key]) >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many OTP requests. Please wait 5 minutes.")
+    _otp_attempts[key].append(now)
+
+    s = get_settings()
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT email FROM users WHERE username = ?", (username,)
+        ).fetchone()
+
+    # Always return success-like message to avoid revealing if username exists
+    if not row or not row[0] or "@" not in row[0]:
+        return {
+            "sent": False,
+            "message": "If an account with that username exists and has a verified email, a reset code has been sent.",
+        }
+
+    email = row[0]
+    otp_code = generate_otp()
+
+    # Store hashed OTP with expiry
+    store_otp(s.db_path, username, otp_code)
+
+    # Send email
+    success = send_otp_email(email, otp_code, username)
+
+    if not success:
+        log_security_event("otp_email_send_failed", {"username": username}, ip_address=client_ip)
+        raise HTTPException(500, "Failed to send email. Please try the security question method instead.")
+
+    # Mask email for display: j***@company.com
+    parts = email.split("@")
+    masked = parts[0][0] + "***@" + parts[1] if len(parts) == 2 else "***"
+
+    log_security_event("otp_requested", {"username": username, "email_masked": masked}, ip_address=client_ip)
+
+    return {
+        "sent": True,
+        "email_masked": masked,
+        "message": f"A 6-digit code has been sent to {masked}. It expires in 10 minutes.",
+    }
+
+
+@router.post("/verify-otp")
+async def verify_email_otp(req: VerifyOtpRequest, request: Request):
+    """Verify the OTP code sent via email."""
+    from backend.app.services.email_service import verify_otp
+
+    username = req.username.strip()
+    otp = req.otp_code.strip()
+
+    if not username or not otp:
+        raise HTTPException(400, "Username and OTP code are required")
+
+    if len(otp) != 6 or not otp.isdigit():
+        raise HTTPException(400, "OTP must be a 6-digit number")
+
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"otp_verify:{client_ip}"
+    now = time.time()
+
+    # Rate limiting on verification
+    _otp_attempts[key] = [t for t in _otp_attempts[key] if now - t < OTP_COOLDOWN_SECONDS]
+    if len(_otp_attempts[key]) >= OTP_MAX_ATTEMPTS:
+        raise HTTPException(429, "Too many attempts. Please request a new code.")
+    _otp_attempts[key].append(now)
+
+    s = get_settings()
+    if not verify_otp(s.db_path, username, otp):
+        remaining = OTP_MAX_ATTEMPTS - len(_otp_attempts[key])
+        log_security_event("otp_verify_failed", {"username": username, "remaining": remaining},
+                           ip_address=client_ip)
+        raise HTTPException(400, f"Invalid or expired code. {remaining} attempt(s) remaining.")
+
+    log_security_event("otp_verified", {"username": username}, ip_address=client_ip)
+    return {"verified": True}
+
+
+@router.post("/reset-with-otp")
+async def reset_password_with_otp(req: ResetWithOtpRequest, request: Request):
+    """Reset password after OTP verification."""
+    from backend.app.services.email_service import verify_otp, clear_otp
+
+    username = req.username.strip()
+    otp = req.otp_code.strip()
+
+    if not username or not otp or not req.new_password:
+        raise HTTPException(400, "All fields are required")
+
+    _validate_password(req.new_password)
+
+    client_ip = request.client.host if request.client else "unknown"
+    s = get_settings()
+
+    # Re-verify OTP (defense in depth)
+    if not verify_otp(s.db_path, username, otp):
+        raise HTTPException(400, "Invalid or expired OTP. Please request a new code.")
+
+    with sqlite3.connect(s.db_path) as con:
+        row = con.execute(
+            "SELECT user_id FROM users WHERE username = ?", (username,)
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(400, "Password reset failed.")
+
+    # Update password and clear OTP
+    new_hash = hash_password(req.new_password)
+    with sqlite3.connect(s.db_path) as con:
+        con.execute(
+            "UPDATE users SET hashed_password = ? WHERE username = ?",
+            (new_hash, username),
+        )
+    clear_otp(s.db_path, username)
+
+    # Revoke all existing tokens
+    revoke_all_user_refresh_tokens(row[0])
+
+    log_security_event("password_reset_via_otp", {"username": username}, user_id=row[0], ip_address=client_ip)
+    return {"status": "success", "message": "Password has been reset successfully. Please log in with your new password."}

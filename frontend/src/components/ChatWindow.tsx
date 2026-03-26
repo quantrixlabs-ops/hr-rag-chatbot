@@ -11,6 +11,7 @@ interface Props {
   streamingText?: string
   onSend: (message: string) => void
   onFeedback?: (query: string, answer: string, rating: string) => void
+  onDetailedFeedback?: (query: string, answer: string, issueCategory: string, comment: string) => void
   onEscalate?: (query: string, answer: string) => void
   token: string
   role?: string
@@ -34,7 +35,7 @@ function TypingIndicator() {
   )
 }
 
-export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback, onEscalate, token, role, feedbackGiven = {} }: Props) {
+export default function ChatWindow({ messages, loading, streamingText, onSend, onFeedback, onDetailedFeedback, onEscalate, token, role, feedbackGiven = {} }: Props) {
   const endRef = useRef<HTMLDivElement>(null)
   const [viewingCitation, setViewingCitation] = useState<Citation | null>(null)
 
@@ -57,10 +58,10 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-xl mx-auto">
                 {[
-                  { icon: <Calendar size={15} className="text-blue-600" />, color: 'bg-blue-50 border-blue-200 hover:bg-blue-100', label: 'Leave & Time Off', q: 'How do I request time off?' },
-                  { icon: <Heart size={15} className="text-rose-600" />, color: 'bg-rose-50 border-rose-200 hover:bg-rose-100', label: 'Benefits & Insurance', q: 'What health insurance plans are available?' },
-                  { icon: <BookOpen size={15} className="text-amber-600" />, color: 'bg-amber-50 border-amber-200 hover:bg-amber-100', label: 'Onboarding', q: 'What should I know for my first day?' },
-                  { icon: <HelpCircle size={15} className="text-purple-600" />, color: 'bg-purple-50 border-purple-200 hover:bg-purple-100', label: 'Policies & Procedures', q: 'What is the remote work policy?' },
+                  { icon: <Calendar size={15} className="text-blue-600" />, color: 'bg-blue-50 border-blue-200 hover:bg-blue-100', label: 'Leave & Time Off', q: 'What is the leave policy?' },
+                  { icon: <Heart size={15} className="text-rose-600" />, color: 'bg-rose-50 border-rose-200 hover:bg-rose-100', label: 'Workplace Safety', q: 'What is the anti-harassment policy?' },
+                  { icon: <BookOpen size={15} className="text-amber-600" />, color: 'bg-amber-50 border-amber-200 hover:bg-amber-100', label: 'Code of Conduct', q: 'What is the code of conduct?' },
+                  { icon: <HelpCircle size={15} className="text-purple-600" />, color: 'bg-purple-50 border-purple-200 hover:bg-purple-100', label: 'Policies & Procedures', q: 'What is the disciplinary policy?' },
                 ].map(card => (
                   <button
                     key={card.q}
@@ -88,6 +89,11 @@ export default function ChatWindow({ messages, loading, streamingText, onSend, o
                 onFeedback={msg.role === 'assistant' && onFeedback && !givenRating
                   ? (rating) => {
                       if (userMsg) onFeedback(userMsg.content, msg.content, rating)
+                    }
+                  : undefined}
+                onDetailedFeedback={msg.role === 'assistant' && onDetailedFeedback && !givenRating
+                  ? (category, comment) => {
+                      if (userMsg) onDetailedFeedback(userMsg.content, msg.content, category, comment)
                     }
                   : undefined}
                 givenFeedback={msg.role === 'assistant' ? givenRating : undefined}

@@ -20,6 +20,8 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")          # Skip HuggingFace online checks
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")     # Use locally cached models only
 # ─────────────────────────────────────────────────────────────────────────────
 
 import sqlite3
@@ -117,8 +119,12 @@ def _wire_services() -> dict:
     )
 
     from backend.app.rag.orchestrator import ModelGateway
-    llm = ModelGateway(s.llm_provider)
-    llm.configure(s.llm_provider, s.vllm_base_url if s.llm_provider == "vllm" else s.ollama_base_url)
+    internal_llm = ModelGateway(s.llm_provider)
+    internal_llm.configure(s.llm_provider, s.vllm_base_url if s.llm_provider == "vllm" else s.ollama_base_url)
+
+    # Wrap internal LLM with AI Router for external provider fallback
+    from backend.app.services.ai_router import AIRouter
+    llm = AIRouter(internal_llm, s)
 
     from backend.app.rag.context_builder import ContextBuilder
     ctx = ContextBuilder(s.max_context_tokens)
@@ -139,9 +145,10 @@ def _wire_services() -> dict:
 
     return {
         "embedding": emb, "vector_store": vs, "bm25": bm25, "dense": dense,
-        "reranker": reranker, "retrieval": retrieval, "llm": llm, "ctx": ctx,
-        "verifier": verifier, "session_store": ss, "ingestion": ingestion,
-        "rag": rag, "chat_service": chat,
+        "reranker": reranker, "retrieval": retrieval,
+        "llm": llm, "model_gateway": internal_llm,  # llm=AIRouter, model_gateway=internal
+        "ctx": ctx, "verifier": verifier, "session_store": ss,
+        "ingestion": ingestion, "rag": rag, "chat_service": chat,
     }
 
 
@@ -232,6 +239,20 @@ def create_app() -> FastAPI:
         openapi_url=None if is_prod else "/openapi.json",
     )
 
+    # Global exception handler — ensures CORS headers on 500 errors
+    from fastapi.responses import JSONResponse as _JSONResponse
+    from fastapi import Request as _Request
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: _Request, exc: Exception):
+        logger.error("unhandled_exception", error=str(exc)[:200], path=str(request.url.path))
+        origin = request.headers.get("origin", "")
+        resp = _JSONResponse(status_code=500, content={"detail": str(exc)[:200]})
+        if origin:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+        return resp
+
     # CORS for frontend dev servers
     app.add_middleware(
         CORSMiddleware,
@@ -290,7 +311,7 @@ def create_app() -> FastAPI:
     # Frontend polls sessions + notifications every 10s = ~12 req/min baseline;
     # plus normal clicks, uploads, chat — 300/min gives ample headroom.
     _global_rate: defaultdict = defaultdict(list)
-    GLOBAL_RATE_LIMIT = 300
+    GLOBAL_RATE_LIMIT = 600
     GLOBAL_RATE_WINDOW = 60  # seconds
 
     class GlobalRateLimitMiddleware(BaseHTTPMiddleware):
@@ -304,10 +325,16 @@ def create_app() -> FastAPI:
                                         if now - t < GLOBAL_RATE_WINDOW]
             if len(_global_rate[client_ip]) >= GLOBAL_RATE_LIMIT:
                 from starlette.responses import JSONResponse
-                return JSONResponse(
+                origin = request.headers.get("origin", "")
+                resp = JSONResponse(
                     status_code=429,
                     content={"detail": "Too many requests. Please slow down."},
                 )
+                # Ensure CORS headers are present so browsers don't mask the error
+                if origin:
+                    resp.headers["Access-Control-Allow-Origin"] = origin
+                    resp.headers["Access-Control-Allow-Credentials"] = "true"
+                return resp
             _global_rate[client_ip].append(now)
             return await call_next(request)
 
@@ -322,7 +349,12 @@ def create_app() -> FastAPI:
                 client_ip = request.client.host if request.client else "unknown"
                 if client_ip not in _admin_allowed_ips and client_ip != "127.0.0.1":
                     from starlette.responses import JSONResponse
-                    return JSONResponse(status_code=403, content={"detail": "IP not allowed"})
+                    origin = request.headers.get("origin", "")
+                    resp = JSONResponse(status_code=403, content={"detail": "IP not allowed"})
+                    if origin:
+                        resp.headers["Access-Control-Allow-Origin"] = origin
+                        resp.headers["Access-Control-Allow-Credentials"] = "true"
+                    return resp
             return await call_next(request)
 
     # Phase 3: Tenant resolution middleware
@@ -374,6 +406,10 @@ def create_app() -> FastAPI:
     from backend.app.api import branch_routes, hr_contact_routes
     # FAQ management
     from backend.app.api import faq_routes
+    # CFLS: Controlled Feedback Learning System
+    from backend.app.api import cfls_routes
+    # AI Configuration: External provider management (Admin only)
+    from backend.app.api import ai_config_routes
 
     API_V1 = "/api/v1"
     app.include_router(auth_routes.router, prefix=API_V1)
@@ -391,6 +427,8 @@ def create_app() -> FastAPI:
     app.include_router(branch_routes.router, prefix=API_V1)
     app.include_router(hr_contact_routes.router, prefix=API_V1)
     app.include_router(faq_routes.router, prefix=API_V1)
+    app.include_router(cfls_routes.router, prefix=API_V1)
+    app.include_router(ai_config_routes.router, prefix=API_V1)
 
     # Backward-compat: legacy routes (no /api/v1 prefix) — redirect to v1
     app.include_router(auth_routes.router)
@@ -405,6 +443,8 @@ def create_app() -> FastAPI:
     app.include_router(branch_routes.router)
     app.include_router(hr_contact_routes.router)
     app.include_router(faq_routes.router)
+    app.include_router(cfls_routes.router)
+    app.include_router(ai_config_routes.router)
 
     # Prometheus metrics — secured behind admin auth
     from backend.app.core.security import get_current_user, require_role
